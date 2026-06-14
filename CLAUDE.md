@@ -62,9 +62,12 @@ has an LLM summarize new items, and posts them to a Discord channel on a schedul
    # SPDX-License-Identifier: AGPL-3.0-or-later
    ```
 
-   Use the comment syntax of the file's language (`#` for Python/TOML/shell). Apply
-   it to code and scripts; prose docs (`*.md`) and empty markers (`.gitkeep`) do not
-   need it. When adding a new file type, follow the same SPDX line.
+   Apply it to **code, scripts, and configuration** (`*.py`, `*.sh`, `*.toml`),
+   using that language's comment syntax (`#` for Python, shell, and TOML) — for
+   `config.toml`, the two lines go at the very top, above the existing banner. It is
+   **not** required on prose docs (`*.md`) or empty markers (`.gitkeep`). When adding
+   a new file of these kinds, put the same SPDX line at the top in that language's
+   comment syntax.
 
 ## Repository layout
 
