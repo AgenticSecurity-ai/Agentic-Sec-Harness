@@ -1,0 +1,36 @@
+# ============================================================================
+# aisec-arxiv-monitor configuration
+# This is the ONLY file you normally need to edit per deployment.
+# No secrets live here except the Discord channel id (not sensitive).
+# AWS/Bedrock credentials and the Discord bot token are configured in OpenClaw
+# itself (see SETUP.md), never in this workspace.
+# ============================================================================
+
+[arxiv]
+# arXiv API search queries. Each entry is a full arXiv `search_query`.
+# Results from all queries are merged and de-duplicated.
+# Field prefixes: cat: (category), abs: (abstract), ti: (title), au: (author).
+# Categories worth knowing: cs.CR (Security), cs.AI, cs.LG, cs.CL (NLP).
+queries = [
+  'cat:cs.CR AND (abs:"large language model" OR abs:"LLM" OR abs:"prompt injection" OR abs:"jailbreak" OR abs:"AI agent" OR abs:"agentic")',
+  'cat:cs.AI AND (abs:"prompt injection" OR abs:"jailbreak" OR abs:"adversarial" OR abs:"red team" OR abs:"data poisoning")',
+  'cat:cs.LG AND (abs:"adversarial attack" OR abs:"model extraction" OR abs:"membership inference" OR abs:"backdoor")',
+]
+
+# Max results fetched per query (newest first).
+max_results = 40
+
+# Ignore papers whose initial submission is older than this many days.
+lookback_days = 7
+
+[output]
+# Language for the generated summaries posted to Discord ("ja", "en", ...).
+language = "ja"
+
+# Hard safety cap on how many papers to post in a single run.
+max_posts_per_run = 8
+
+[discord]
+# Target Discord channel id for posts. FILL THIS IN per deployment.
+# Right-click a channel in Discord (developer mode) -> Copy Channel ID.
+channel_id = ""
