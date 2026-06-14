@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Isao Takaesu
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # ============================================================================
 # aisec-arxiv-monitor configuration
 # This is the ONLY file you normally need to edit per deployment.
