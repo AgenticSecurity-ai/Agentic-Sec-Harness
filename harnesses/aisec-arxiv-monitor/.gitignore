@@ -1,0 +1,12 @@
+# Runtime ledger — ships empty, fills on the host. Never commit accumulated ids.
+state/seen.json
+*.tmp
+__pycache__/
+
+# Host-specific state OpenClaw creates at registration. Not for distribution.
+.openclaw/
+
+# Template files OpenClaw re-scaffolds on `agents add`; not part of this harness.
+USER.md
+TOOLS.md
+HEARTBEAT.md

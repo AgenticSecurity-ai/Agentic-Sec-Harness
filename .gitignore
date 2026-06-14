@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.tmp
+
+# OpenClaw host-specific state (created when a harness is registered as a workspace)
+.openclaw/
+
+# Per-harness runtime ledger — ships empty, fills on the host
+**/state/seen.json
+
+# Template files OpenClaw re-scaffolds on `agents add` (not part of any harness)
+**/USER.md
+**/TOOLS.md
+**/HEARTBEAT.md
+
+# OS noise
+.DS_Store
