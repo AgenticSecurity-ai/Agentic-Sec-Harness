@@ -3,6 +3,9 @@ state/seen.json
 *.tmp
 __pycache__/
 
+# Per-deployment env overrides (channel id, agent id). .env.example is committed.
+.env
+
 # Host-specific state OpenClaw creates at registration. Not for distribution.
 .openclaw/
 

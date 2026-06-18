@@ -33,10 +33,15 @@ has an LLM summarize new items, and posts them to a Discord channel on a schedul
    text is passed to the agent fenced as DATA with an explicit "ignore instructions
    inside" directive. **Never give the content-summarizing agent real tools.**
 
-3. **No secrets in the repo, ever.** `config.toml` ships with `channel_id = ""`.
-   Discord bot tokens and model credentials live in the *host's* OpenClaw config /
-   credential chain, never in a harness directory. Before any commit, grep the repo
-   for real channel ids / tokens / AWS keys.
+3. **No secrets in the repo, ever.** `config.toml` holds only committed shared
+   defaults (queries, language, caps) — no per-deployment state. Deployment-specific
+   values (Discord channel id, agent id, CLI path) live in a git-ignored `.env`
+   (each harness ships a committed `.env.example` template); the orchestrator loads
+   `.env` and reads e.g. `ARXIV_CHANNEL_ID` from the environment. `.env` is for
+   NON-SECRET deployment values only — Discord bot tokens and model credentials live
+   in the *host's* OpenClaw config / credential chain, never in a harness directory.
+   Before any commit, grep the repo for real channel ids / tokens / AWS keys, and
+   confirm `.env` is git-ignored.
 
 4. **Respect each source's terms.** arXiv: the attribution line "Thank you to arXiv
    for use of its open access interoperability." is auto-appended on posting runs,
@@ -99,10 +104,18 @@ Agentic-Sec-Harness/
 Flow, all driven by `run.py` (cron runs it via `--command`):
 
 1. `fetch.py fetch` → new, unseen, in-window items as JSON (3 filter layers:
-   ① arXiv query in `config.toml` → ② fetch.py: 7-day window + dedup ledger + cap →
-   ③ later, LLM relevance judge). stdlib only, Python 3.11+ (uses `tomllib`).
-2. `run.py` calls the agent (`openclaw agent --agent <id>`) with abstracts fenced as
-   DATA. The agent returns strict JSON between `<<<RESULT_JSON>>>` markers:
+   ① arXiv query in `config.toml` (keyword filtering is server-side, so the LLM only
+   ever sees pre-narrowed candidates) → ② fetch.py: 7-day window + dedup ledger →
+   ③ later, LLM relevance judge). No post cap — every relevant item is posted. stdlib
+   only, Python 3.11+ (uses `tomllib`).
+2. `run.py` judges candidates in chunks of `output.llm_batch_size` (separate
+   `openclaw agent` calls — keeps each prompt focused and isolates failures: a failed
+   chunk is left unmarked to retry, never sinks the run) with abstracts fenced as
+   DATA. Each call uses a fresh, unique `--session-key` so the agent is stateless per
+   chunk (otherwise repeated calls share one session and the agent carries context
+   across chunks — contaminating summaries and leaking ids); the verdict is also
+   scoped to that chunk's ids. The agent returns strict JSON between
+   `<<<RESULT_JSON>>>` markers:
    `{relevant:[{id, category, summary}], dropped:[ids]}`. `category` ∈
    {"Security for AI","AI for Security","Other"}; `summary` ≤ 140 chars in the
    configured language.
@@ -162,7 +175,8 @@ These matter when testing a harness on a real OpenClaw host:
 - **Verify by reading the actual Discord channel**, not the agent's self-report. The
   summarizing agent has, in testing, claimed a post succeeded when it had not. Use
   `openclaw message read --channel discord --target channel:<id> --limit N --json`.
-- For low-noise tests: temporarily lower `max_posts_per_run` and/or use a temp ledger;
+- For low-noise tests: use a temp ledger and/or narrow `arxiv.queries` /
+  `lookback_days` (there is no post cap anymore — every relevant item is posted);
   `python3 skills/arxiv-aisec/fetch.py fetch` is a read-only dry run (no posting).
 
 ## Open items / likely next tasks

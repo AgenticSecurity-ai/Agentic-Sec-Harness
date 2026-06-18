@@ -100,11 +100,33 @@ removes attack surface without removing functionality.
 
 ### 5. Set your parameters
 
-Edit `config.toml`:
+Two files, split by what they're for:
+
+**`config.toml`** — shippable defaults you commit (no secrets, no per-deployment
+state):
 - `arxiv.queries` — tune to your interests (defaults target LLM/agent security).
 - `output.language` — summary language (`ja`, `en`, ...).
-- `output.max_posts_per_run` — per-run cap.
-- `discord.channel_id` — **required**: your target channel id.
+- `output.llm_batch_size` — papers per LLM judging call (candidates are chunked into
+  separate calls). There is no post cap — every relevant paper is posted, since the
+  arXiv keyword queries already bound the candidate count.
+
+**`.env`** (git-ignored) — the deployment-specific values. Copy the template and
+fill it in:
+
+```bash
+cp .env.example .env   # then edit
+```
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `ARXIV_CHANNEL_ID` | target Discord channel id | **required to post** |
+| `ARXIV_AGENT_ID` | the agent the orchestrator invokes | `arxiv` |
+| `OPENCLAW_BIN` | the `openclaw` CLI path | `openclaw` (on PATH) |
+
+The target channel is set **only** here (`ARXIV_CHANNEL_ID`) — it is not in
+`config.toml`, so the committed config carries no deployment state. An exported
+shell variable wins over `.env`. **Only non-secret values go in `.env`** — the
+Discord bot token and AWS credentials stay in OpenClaw (see the security notes).
 
 ### 6. Schedule it
 
@@ -134,6 +156,32 @@ python3 skills/arxiv-aisec/run.py        # direct, or:
 openclaw cron run <job-id>               # via cron (debug)
 ```
 
+## Run on a schedule, or by hand
+
+You can switch freely between scheduled (cron) and manual operation — the cron job
+and the orchestrator are independent. First find the job id with
+`openclaw cron list` (the `ID` column), then:
+
+| What you want | Command |
+|---|---|
+| **Run once, now** (leave the schedule as-is) | `openclaw cron run <job-id>` |
+| **Pause the daily schedule** (keep the job) | `openclaw cron disable <job-id>` |
+| **Resume the daily schedule** | `openclaw cron enable <job-id>` |
+| **Change the schedule** (time, interval) | `openclaw cron edit <job-id>` |
+| **Run without cron at all** | `python3 skills/arxiv-aisec/run.py` |
+| **Dry run** (read-only, no posting) | `python3 skills/arxiv-aisec/fetch.py fetch` |
+
+`disable`/`enable` toggle the schedule without deleting the job, so you can move
+between "fully manual" (disable, then `cron run` when you want it) and "back on a
+daily timer" (enable) at any time. Managing cron jobs requires an operator token
+with the `operator.admin` scope.
+
+> **Note for laptop / WSL2 hosts:** a scheduled run only fires while the host is
+> awake. If the machine is asleep at the scheduled time, OpenClaw runs the job once
+> it wakes (so it may run late), and a day the host never comes up is skipped
+> entirely. If that's unreliable for you, prefer manual operation: `disable` the
+> schedule and trigger runs by hand with `openclaw cron run <job-id>`.
+
 ## How it stays idempotent
 
 `state/seen.json` records arXiv ids. The orchestrator marks a paper seen only after
@@ -143,7 +191,8 @@ post retries next run — never a silent loss. It ships empty and fills at runti
 
 ## What's tunable vs fixed
 
-- **Tune:** `config.toml` (queries, language, caps, channel).
+- **Tune:** `config.toml` (queries, language, caps) and `.env` (deployment-specific:
+  `ARXIV_CHANNEL_ID`, `ARXIV_AGENT_ID`, `OPENCLAW_BIN`).
 - **Adjust if you change the routine:** `skills/arxiv-aisec/run.py`
   (`build_prompt` = what the agent judges/summarizes; `format_post` = the post
   layout; `fetch.py` = the arXiv query + rate limit).
@@ -154,7 +203,8 @@ post retries next run — never a silent loss. It ships empty and fills at runti
 ```
 aisec-arxiv-monitor/
 ├── README.md                  ← this file
-├── config.toml                ← the only file you normally edit
+├── config.toml                ← shippable defaults (queries, language, caps)
+├── .env.example               ← copy to .env for per-deployment overrides
 ├── AGENTS.md / SOUL.md / IDENTITY.md
 ├── skills/arxiv-aisec/
 │   ├── SKILL.md               ← architecture + threat model
