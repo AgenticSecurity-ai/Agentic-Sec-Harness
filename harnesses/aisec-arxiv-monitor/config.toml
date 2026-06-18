@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # ============================================================================
 # aisec-arxiv-monitor configuration
-# This is the ONLY file you normally need to edit per deployment.
-# No secrets live here except the Discord channel id (not sensitive).
+# Committed shared defaults only (queries, language, caps) — no secrets, no
+# per-deployment state. Deployment-specific values (the Discord channel id, etc.)
+# go in a git-ignored .env (copy .env.example), NOT here.
 # AWS/Bedrock credentials and the Discord bot token are configured in OpenClaw
 # itself (see SETUP.md), never in this workspace.
 # ============================================================================
@@ -11,16 +12,26 @@
 [arxiv]
 # arXiv API search queries. Each entry is a full arXiv `search_query`.
 # Results from all queries are merged and de-duplicated.
+# Two keyword groups, split by category type — each query's keywords supply the
+# axis its category does NOT already constrain:
+#   - Group A (cs.CR = cybersecurity): keywords supply the AI/ML signal.
+#   - Group B (AI/ML categories): keywords supply the security signal.
 # Field prefixes: cat: (category), abs: (abstract), ti: (title), au: (author).
-# Categories worth knowing: cs.CR (Security), cs.AI, cs.LG, cs.CL (NLP).
 queries = [
-  'cat:cs.CR AND (abs:"large language model" OR abs:"LLM" OR abs:"prompt injection" OR abs:"jailbreak" OR abs:"AI agent" OR abs:"agentic")',
-  'cat:cs.AI AND (abs:"prompt injection" OR abs:"jailbreak" OR abs:"adversarial" OR abs:"red team" OR abs:"data poisoning")',
-  'cat:cs.LG AND (abs:"adversarial attack" OR abs:"model extraction" OR abs:"membership inference" OR abs:"backdoor")',
+  # Group A — cs.CR (cybersecurity category): keywords = AI/ML subject terms
+  # (the category already implies security; these narrow it to AI-related security).
+  'cat:cs.CR AND (abs:"machine learning" OR abs:"deep learning" OR abs:"neural network" OR abs:"LLM" OR abs:"large language model" OR abs:"language model" OR abs:"GPT" OR abs:"gemini" OR abs:"claude" OR abs:"mythos" OR abs:"openclaw" OR abs:"codex" OR abs:"chatbot" OR abs:"prompt" OR abs:"system prompt" OR abs:"adversarial" OR abs:"foundation model" OR abs:"transformer" OR abs:"diffusion model" OR abs:"vision language model" OR abs:"vision language action" OR abs:"audio language model" OR abs:"generative" OR abs:"RAG" OR abs:"retrieval-augmented" OR abs:"AI agent" OR abs:"agentic" OR abs:"agent" OR abs:"prompt" OR abs:"mixture of experts" OR abs:"multimodal" OR abs:"model context protocol" OR abs:"mcp" OR abs:"agent payments protocol" OR abs:"ap2" OR abs:"a2a" OR abs:"computer vision" OR abs:"face recognition" OR abs:"speech recognition" OR abs:"text classifier" OR abs:"LLM-as-a-judge" OR abs:"hallucination" OR abs:"explainable AI" OR abs:"xai")',
+  # Group B — security keyword set, applied to the AI/ML categories AND cs.CR.
+  # (For the AI/ML categories the category implies AI and these supply security; for
+  # cs.CR this is additive to Group A, so cs.CR matches an AI-subject OR a security
+  # term. A few bare words — jailbreak/poisoning/backdoor — also catch non-AI
+  # homonyms in cs.CR (iOS jailbreak, DNS poisoning, HW backdoor); the judge drops them.)
+  '(cat:cs.CR OR cat:cs.AI OR cat:cs.LG OR cat:cs.CL OR cat:cs.CV OR cat:stat.ML) AND (abs:"jailbreak" OR abs:"poisoning" OR abs:"backdoor" OR abs:"unlearning" OR abs:"sponge example" OR abs:"prompt injection" OR abs:"prompt leak" OR abs:"prompt leaking" OR abs:"prompt leakage" OR abs:"adversarial attack" OR abs:"adversarial example" OR abs:"model extraction" OR abs:"model stealing" OR abs:"training data extraction" OR abs:"membership inference" OR abs:"model inversion" OR abs:"differential privacy" OR abs:"gradient leakage" OR abs:"model fingerprinting" OR abs:"fingerprinting" OR abs:"watermark" OR abs:"watermarking" OR abs:"deepfake" OR abs:"deep fake" OR abs:"agent security" OR abs:"safety alignment" OR abs:"red team" OR abs:"red-team" OR abs:"guardrail" OR abs:"toxicity" OR abs:"LLM safety" OR abs:"fake news")',
 ]
 
-# Max results fetched per query (newest first).
-max_results = 40
+# Max results fetched per query (newest first). Higher than before because Group B
+# merges five categories into a single query.
+max_results = 200
 
 # Ignore papers whose initial submission is older than this many days.
 lookback_days = 7
@@ -29,10 +40,8 @@ lookback_days = 7
 # Language for the generated summaries posted to Discord ("ja", "en", ...).
 language = "ja"
 
-# Hard safety cap on how many papers to post in a single run.
-max_posts_per_run = 8
-
-[discord]
-# Target Discord channel id for posts. FILL THIS IN per deployment.
-# Right-click a channel in Discord (developer mode) -> Copy Channel ID.
-channel_id = ""
+# Number of candidate papers per LLM judging call. Candidates are split into chunks
+# of this size and judged in separate calls — smaller chunks keep each prompt focused
+# and isolate failures. There is no post cap; arXiv keyword filtering already bounds
+# the candidate count, so every relevant paper is posted.
+llm_batch_size = 8

@@ -130,7 +130,6 @@ def cmd_fetch(cfg, seen_path):
     queries = arx.get("queries", [])
     max_results = int(arx.get("max_results", 30))
     lookback_days = int(arx.get("lookback_days", 7))
-    cap = int(cfg.get("output", {}).get("max_posts_per_run", 10))
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
     seen = load_seen(seen_path)
@@ -160,7 +159,6 @@ def cmd_fetch(cfg, seen_path):
         fresh.append(item)
 
     fresh.sort(key=lambda x: x["published"], reverse=True)
-    fresh = fresh[:cap]
 
     print(json.dumps({
         "generated_at": datetime.now(timezone.utc).isoformat(),

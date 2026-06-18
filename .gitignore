@@ -6,6 +6,10 @@ __pycache__/
 # OpenClaw host-specific state (created when a harness is registered as a workspace)
 .openclaw/
 
+# Per-deployment env overrides — non-secret deployment-specific values.
+# Each harness ships a committed .env.example template instead.
+**/.env
+
 # Per-harness runtime ledger — ships empty, fills on the host
 **/state/seen.json
 

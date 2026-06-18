@@ -18,6 +18,7 @@ Stdlib only (Python 3.11+). Calls the `openclaw` CLI as a subprocess.
 """
 import os
 import sys
+import time
 import json
 import subprocess
 
@@ -25,6 +26,31 @@ SKILL_DIR = os.path.dirname(os.path.abspath(__file__))
 WORKSPACE = os.path.abspath(os.path.join(SKILL_DIR, "..", ".."))
 FETCH = os.path.join(SKILL_DIR, "fetch.py")
 CONFIG = os.path.join(WORKSPACE, "config.toml")
+
+
+def _load_dotenv(path):
+    """Load KEY=VALUE lines from a .env file into os.environ (stdlib-only; no
+    python-dotenv). Already-exported variables win, so an explicit `export` still
+    overrides the file. Only NON-SECRET, deployment-specific values belong in .env
+    (e.g. ARXIV_CHANNEL_ID) — Discord bot tokens and AWS credentials stay in
+    OpenClaw's config / credential chain, never here (security profile B2)."""
+    try:
+        with open(path) as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        return
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        if key:
+            os.environ.setdefault(key, val.strip().strip('"').strip("'"))
+
+
+_load_dotenv(os.path.join(WORKSPACE, ".env"))
+
 OPENCLAW = os.environ.get("OPENCLAW_BIN", "openclaw")
 AGENT_ID = os.environ.get("ARXIV_AGENT_ID", "arxiv")
 ACK = "Thank you to arXiv for use of its open access interoperability."
@@ -35,6 +61,15 @@ VALID_CATEGORIES = ("Security for AI", "AI for Security", "Other")
 # surrounding log noise / prose deterministically.
 BEGIN = "<<<RESULT_JSON>>>"
 END = "<<<END_RESULT_JSON>>>"
+
+# Unique per-process tag → each chunk gets its own fresh agent session (stateless).
+_SESSION_BASE = f"arxiv-{os.getpid()}-{int(time.time())}"
+
+
+def progress(msg):
+    """Live progress to stderr (flushed) so a manual run shows what's happening
+    step by step; the final machine-readable [ok] summary stays on stdout."""
+    print(msg, file=sys.stderr, flush=True)
 
 
 def load_config():
@@ -94,18 +129,30 @@ Return ONLY a JSON object wrapped exactly in these markers, nothing else after i
 Every input id MUST appear in exactly one of "relevant" or "dropped"."""
 
 
-def call_agent(prompt):
+class AgentError(Exception):
+    """The agent gave no parseable JSON for a chunk — recoverable per chunk."""
+
+
+def call_agent(prompt, session_key):
+    # Unique session key per call so each chunk is judged statelessly. Without it,
+    # repeated `openclaw agent` calls share one default session and the agent carries
+    # context across chunks — cross-contaminating summaries/classifications and
+    # leaking ids between chunks. The summarizer must be a pure text transform.
     out = subprocess.run(
-        [OPENCLAW, "agent", "--agent", AGENT_ID, "--message", prompt],
+        [OPENCLAW, "agent", "--agent", AGENT_ID,
+         "--session-key", session_key, "--message", prompt],
         capture_output=True, text=True, timeout=300,
     )
     text = out.stdout
     if BEGIN not in text or END not in text:
-        sys.exit("[error] agent returned no parseable JSON block; marking nothing "
-                 "(papers will retry next run).\n--- agent stdout tail ---\n"
-                 + text[-800:])
+        raise AgentError("no marker-wrapped JSON block.\n"
+                         "--- agent stdout tail ---\n" + text[-800:])
     block = text.split(BEGIN, 1)[1].split(END, 1)[0].strip()
-    return json.loads(block)
+    try:
+        return json.loads(block)
+    except json.JSONDecodeError as exc:
+        raise AgentError(f"JSON did not parse: {exc}\n"
+                         "--- block tail ---\n" + block[-800:])
 
 
 def post_message(channel_id, text):
@@ -139,11 +186,15 @@ def format_post(item, category, summary):
 
 def main():
     cfg = load_config()
-    channel_id = cfg.get("discord", {}).get("channel_id", "").strip()
+    # The target channel is deployment-specific, so it lives only in .env / the
+    # environment (not in the committed config.toml).
+    channel_id = (os.environ.get("ARXIV_CHANNEL_ID") or "").strip()
     language = cfg.get("output", {}).get("language", "ja")
     if not channel_id:
-        sys.exit("[error] discord.channel_id is empty in config.toml — not configured.")
+        sys.exit("[error] no Discord channel configured — set ARXIV_CHANNEL_ID "
+                 "in .env (copy .env.example) or export it in the environment.")
 
+    progress("[..] fetching new papers from arXiv…")
     fetched = run_fetch()
     items = fetched.get("items", [])
     if not items:
@@ -151,32 +202,62 @@ def main():
         return
     by_id = {it["id"]: it for it in items}
 
-    verdict = call_agent(build_prompt(items, language))
-    relevant = verdict.get("relevant", [])
-    dropped = [i for i in verdict.get("dropped", []) if i in by_id]
+    # Judge in small chunks rather than one giant prompt: keeps each prompt focused
+    # (avoids "lost in the middle" + long-output degradation) and isolates failures
+    # so one bad chunk can't sink the run. arXiv keyword filtering already bounds the
+    # candidate count, so there is no post cap — every RELEVANT paper is posted.
+    batch_size = max(1, int(cfg.get("output", {}).get("llm_batch_size", 8)))
+    chunks = [items[i:i + batch_size] for i in range(0, len(items), batch_size)]
+    progress(f"[..] {len(items)} candidate(s) → judging in {len(chunks)} chunk(s) "
+             f"of up to {batch_size}…")
 
+    relevant, dropped, deferred = [], [], 0
+    for n, chunk in enumerate(chunks, 1):
+        progress(f"[..] chunk {n}/{len(chunks)}: judging {len(chunk)} paper(s)…")
+        chunk_ids = {it["id"] for it in chunk}
+        try:
+            verdict = call_agent(build_prompt(chunk, language), f"{_SESSION_BASE}-c{n}")
+        except AgentError as exc:
+            deferred += len(chunk)  # left unmarked -> retried next run
+            progress(f"[warn] chunk {n}/{len(chunks)} failed; leaving {len(chunk)} "
+                     f"paper(s) unmarked for retry. {exc}")
+            continue
+        # Scope the verdict strictly to THIS chunk's ids — a chunk must never mark or
+        # post another chunk's papers (defends the deferred-retry guarantee).
+        rel = [e for e in verdict.get("relevant", []) if e.get("id") in chunk_ids]
+        drp = [i for i in verdict.get("dropped", []) if i in chunk_ids]
+        relevant.extend(rel)
+        dropped.extend(drp)
+        progress(f"[..] chunk {n}/{len(chunks)}: {len(rel)} relevant, {len(drp)} dropped")
+
+    total = len(relevant)
+    if total:
+        progress(f"[..] posting up to {total} relevant paper(s) to Discord…")
     posted = []
-    for entry in relevant:
+    handled = set()  # within-run guard: never post the same id twice in one run,
+    for entry in relevant:  # whatever the agent returns (defends against duplicates)
         pid = entry.get("id")
         item = by_id.get(pid)
-        if not item:
+        if not item or pid in handled:
             continue
+        handled.add(pid)
         if post_message(channel_id, format_post(item, entry.get("category", ""), entry.get("summary", ""))):
             posted.append(pid)
+            progress(f"[..] posted {len(posted)}: {item['title'][:60]}")
         else:
-            print(f"[warn] post failed for {pid}; leaving unmarked for retry.",
-                  file=sys.stderr)
+            progress(f"[warn] post failed for {pid}; leaving unmarked for retry.")
 
     if posted:
         post_message(channel_id, ACK)  # arXiv ToU attribution, once per run
 
-    # Mark: successfully-posted relevant + agent-dropped. NOT relevant-but-failed.
+    # Mark: successfully-posted relevant + agent-dropped. Left UNMARKED (retry next
+    # run): relevant-but-failed-to-post, and every paper in a failed chunk.
     to_mark = posted + dropped
     if to_mark:
         subprocess.run([sys.executable, FETCH, "mark", *to_mark], timeout=60)
 
-    print(f"[ok] fetched={len(items)} posted={len(posted)} "
-          f"dropped={len(dropped)} marked={len(to_mark)}")
+    print(f"[ok] fetched={len(items)} chunks={len(chunks)} posted={len(posted)} "
+          f"dropped={len(dropped)} deferred={deferred} marked={len(to_mark)}")
 
 
 if __name__ == "__main__":

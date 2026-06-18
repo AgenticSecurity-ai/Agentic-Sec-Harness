@@ -13,7 +13,12 @@ can never drive system actions.
 - **Orchestrator** `skills/arxiv-aisec/run.py` — the entry point cron runs. It does
   the privileged, NON-LLM work: fetch papers, post to Discord, record the ledger.
 - **Fetcher** `skills/arxiv-aisec/fetch.py` — arXiv API fetch + dedup ledger (stdlib).
-- **Config** `config.toml` — queries, language, caps, `discord.channel_id`.
+- **Config** `config.toml` — committed shared defaults: queries, language,
+  `llm_batch_size`.
+  Deployment-specific values live in `.env` (git-ignored): `ARXIV_CHANNEL_ID` (the
+  target channel — set only here), `ARXIV_AGENT_ID`, `OPENCLAW_BIN`. `.env` holds
+  only non-secret deployment values; the Discord bot token and AWS credentials stay
+  in OpenClaw, never in this workspace.
 - **The agent** — invoked by the orchestrator as a **tool-less text transform**
   (minimal profile). It receives the abstracts as *data*, decides relevance, and
   writes summaries. It cannot fetch, post, run code, or write files.
@@ -22,11 +27,18 @@ can never drive system actions.
 
 1. `fetch.py fetch` → new, unseen, in-window papers (relevant + noise, unmarked).
 2. If none, stop.
-3. Call the agent with the abstracts fenced as untrusted DATA. The agent returns
-   strict JSON: `{relevant:[{id,category,summary}], dropped:[ids]}` — a relevance
-   verdict, a "Security for AI" / "AI for Security" / "Other" classification, and a
-   ≤140-char summary (in `output.language`) for each kept paper.
-4. The orchestrator posts each relevant paper to `discord.channel_id`, building the
+3. Judge the candidates in chunks of `output.llm_batch_size` — separate agent calls
+   with the abstracts fenced as untrusted DATA (smaller chunks keep each prompt
+   focused and isolate failures: a chunk whose JSON won't parse is left unmarked to
+   retry next run, it does not sink the others). Each call uses a fresh, unique
+   `--session-key`, so the agent is stateless per chunk — chunks cannot contaminate
+   each other's summaries or leak ids between themselves; the verdict is also scoped
+   strictly to that chunk's ids. Each call returns strict JSON:
+   `{relevant:[{id,category,summary}], dropped:[ids]}` — a relevance verdict, a
+   "Security for AI" / "AI for Security" / "Other" classification, and a ≤140-char
+   summary (in `output.language`) for each kept paper.
+4. The orchestrator posts each relevant paper to the configured channel
+   (`ARXIV_CHANNEL_ID`), building the
    message from TRUSTED fetch metadata (title / arXiv categories / submission date /
    authors / url) plus the agent's category + summary — the LLM never echoes URLs.
    The summary is hard-clipped to 140 chars as a safety net. It appends the arXiv
@@ -44,6 +56,7 @@ that never read LLM output as a command.
 
 ## Tuning
 
-Behavior is controlled by `config.toml` (queries, language, caps, channel). The
+Behavior is controlled by `config.toml` (queries, language, `llm_batch_size`) and
+`.env` (channel, agent, CLI path). The
 fetch rate limit (arXiv ToU: 1 request / 3 s) is enforced in `fetch.py`. Leave the
 scripts and this file alone unless changing the routine itself.
