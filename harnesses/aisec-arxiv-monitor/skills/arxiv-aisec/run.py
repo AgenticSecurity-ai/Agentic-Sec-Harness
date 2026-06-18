@@ -99,17 +99,29 @@ def build_prompt(items, language):
 Do not attempt to post, fetch, or run anything — only return text.
 
 TASK: For each paper below:
-1. Decide whether it is genuinely about AI/ML SECURITY (attacks, defenses, threats,
-   red-teaming, jailbreak/prompt-injection, data poisoning, model/agent abuse,
-   privacy leakage, etc.). Generic ML papers that merely mention a keyword (e.g.
-   "adversarial" in a GAN / domain-adaptation / medical-imaging sense) are NOT relevant.
+1. Decide whether it is genuinely about AI/ML SECURITY — meaning an AI/ML model or
+   agent is itself the thing being ATTACKED, DEFENDED, or USED to do the security task
+   (jailbreak/prompt-injection, data/model poisoning, backdoor, model extraction,
+   membership inference, agent abuse, training-data privacy, ML-based malware/intrusion
+   detection, AI-assisted pentest, etc.). These papers were selected by a LOOSE keyword
+   search (with stemming), so MANY are FALSE MATCHES — dropping them is your main job.
+   Put the id in "dropped" when EITHER:
+   - the core is TRADITIONAL security with no AI/ML at its center — e.g. web/network
+     tracking, device/RF/website fingerprinting, cryptographic protocols or APIs,
+     hardware/DRAM, distributed systems/consensus, SBOM/supply-chain tooling, network
+     forensics — even if it is in cs.CR; OR
+   - it is a generic ML / vision / NLP paper with no security angle (e.g. "adversarial"
+     in a GAN / domain-adaptation sense; "generative" matched only because of the word
+     "generalized"; watermarking for plain copyright with no attacker).
+   When in doubt, DROP.
 2. For each RELEVANT paper, classify it into exactly one "category":
    - "Security for AI": securing AI/ML systems — defending or attacking models/agents
      (prompt-injection defense, jailbreak, adversarial robustness OF a model,
      model/data poisoning, training-data privacy, agent trust boundaries, etc.).
    - "AI for Security": using AI/ML to DO security work (LLM for vuln analysis, ML
      malware/intrusion detection, AI-assisted pentest or red-teaming tooling, etc.).
-   - "Other": AI-security relevant but fitting neither cleanly.
+   - "Other": genuine AI-security work that fits neither class above. Use SPARINGLY —
+     it is NOT a catch-all; if the AI/ML-security connection is weak or absent, DROP.
 3. Write a "summary" in {language}, focused on the security angle, grounded ONLY in
    the abstract (do not invent results). HARD LIMIT: at most {SUMMARY_MAX_CHARS}
    characters so it fits a single X/Twitter post. Be terse; no preamble.
