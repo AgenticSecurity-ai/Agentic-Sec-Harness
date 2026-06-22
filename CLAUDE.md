@@ -178,6 +178,17 @@ These matter when testing a harness on a real OpenClaw host:
 - For low-noise tests: use a temp ledger and/or narrow `arxiv.queries` /
   `lookback_days` (there is no post cap anymore — every relevant item is posted);
   `python3 skills/arxiv-aisec/fetch.py fetch` is a read-only dry run (no posting).
+- **"The newest day's papers aren't fetched" is arXiv export API indexing lag, NOT a
+  harness bug.** The website (`arxiv.org/list/<cat>/recent`) updates on announcement,
+  but the search API (`export.arxiv.org/api`) lags it by 1–2 business days (worse
+  across weekends). Triage in one shot: query bare `cat:cs.CR` / `cat:cs.AI` with
+  `sortBy=submittedDate&sortOrder=descending` and read the newest `published` date —
+  if it's several days behind today, it's API lag (the `updated` axis lags too). If
+  our keyword query were the cause, the bare query would still surface newer dates.
+  **Nothing is lost:** `lookback_days` (≥7) plus the post-then-mark dedup ledger mean
+  the missing day is auto-recovered on the next cron run once the API catches up — no
+  fix needed, just wait. (Note: `fetch.py`'s window filter keys on `published` = the
+  v1 submission date, which can differ from the recent-listing announce date.)
 
 ## Open items / likely next tasks
 
