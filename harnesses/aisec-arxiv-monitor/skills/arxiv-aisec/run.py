@@ -27,6 +27,12 @@ WORKSPACE = os.path.abspath(os.path.join(SKILL_DIR, "..", ".."))
 FETCH = os.path.join(SKILL_DIR, "fetch.py")
 CONFIG = os.path.join(WORKSPACE, "config.toml")
 
+# Must exceed fetch.py's worst-case retry budget (per query: up to MAX_RETRIES+1
+# attempts * HTTP_TIMEOUT + backoff; times the query count) so a legitimately
+# retrying fetch is never killed mid-backoff. Generous on purpose — a normal run
+# finishes in seconds; this ceiling only bites during sustained arXiv degradation.
+FETCH_TIMEOUT_SECONDS = 720
+
 
 def _load_dotenv(path):
     """Load KEY=VALUE lines from a .env file into os.environ (stdlib-only; no
@@ -79,13 +85,23 @@ def load_config():
 
 
 def run_fetch():
-    out = subprocess.run(
-        [sys.executable, FETCH, "fetch"],
-        capture_output=True, text=True, timeout=180,
-    )
+    # stderr is NOT captured: fetch.py streams its per-query progress and retry/
+    # backoff warnings straight to the console / cron log so a run is never silent
+    # during slow or degraded arXiv calls. Only stdout (the JSON result) is captured.
+    try:
+        out = subprocess.run(
+            [sys.executable, FETCH, "fetch"],
+            stdout=subprocess.PIPE, text=True, timeout=FETCH_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        sys.exit(f"[error] fetch timed out after {FETCH_TIMEOUT_SECONDS}s "
+                 "(arXiv likely degraded); nothing marked, will retry next run")
     if out.returncode != 0:
-        sys.exit(f"[error] fetch failed: {out.stderr.strip()}")
-    return json.loads(out.stdout)
+        sys.exit("[error] fetch failed (see fetch progress above); "
+                 "nothing marked, will retry next run")
+    data = json.loads(out.stdout)
+    progress(f"[..] fetch returned {data['new_count']} new candidate(s)")
+    return data
 
 
 def build_prompt(items, language):
