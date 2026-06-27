@@ -12,9 +12,10 @@ harness into your own OpenClaw, supply your own credentials, and run it.
 | Harness | Source | What it does |
 | ------- | ------ | ------------ |
 | [`aisec-arxiv-monitor`](harnesses/aisec-arxiv-monitor/) | arXiv (AI-security) | Posts new AI-security papers, classified and summarized, to Discord |
+| [`aisec-news-monitor`](harnesses/aisec-news-monitor/) | The Hacker News (RSS) | Filters a general security-news feed to AI-security stories, summarized, to Discord |
 
 See each harness's own `README.md` for what it watches and how to deploy it.
-_(More harnesses — e.g. a security-news monitor — will be added under `harnesses/`.)_
+_(More harnesses will be added under `harnesses/`.)_
 
 ## Design principles
 
@@ -41,6 +42,7 @@ Every harness in this repo follows the same shape:
 2. **Then deploy a harness** — each has its own `README.md` with setup and important
    notes for running it in your own OpenClaw:
    - [aisec-arxiv-monitor/README.md](harnesses/aisec-arxiv-monitor/README.md)
+   - [aisec-news-monitor/README.md](harnesses/aisec-news-monitor/README.md)
 
 General prerequisites: an OpenClaw install with a running gateway, a configured text
 model (Bedrock/Claude-class or any OpenClaw text model), a Discord bot, and Python

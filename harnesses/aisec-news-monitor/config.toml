@@ -1,0 +1,54 @@
+# Copyright (C) 2026 Isao Takaesu
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# ============================================================================
+# aisec-news-monitor configuration
+# Committed shared defaults only (feed url, language, caps) — no secrets, no
+# per-deployment state. Deployment-specific values (the Discord channel id, etc.)
+# go in a git-ignored .env (copy .env.example), NOT here.
+# AWS/Bedrock credentials and the Discord bot token are configured in OpenClaw
+# itself (see ../../docs/HOST-SETUP.md), never in this workspace.
+# ============================================================================
+
+[news]
+# Feeds to read. Each entry is a full feed URL (RSS 2.0 or Atom — the fetcher
+# detects which). Results from all feeds are merged and de-duplicated by item id
+# (guid/link for RSS, <id> for Atom). This is a feed-reader-style consumer: it reads
+# each publisher's officially-provided feed (same purpose as Feedly); it does NOT
+# crawl or scrape article pages, and it sends an honest User-Agent + rate-limits.
+#
+# The LLM relevance judge keeps only genuine AI/ML-security stories and drops the
+# (majority) ordinary security news — there is no per-feed keyword filter.
+#
+# Copyright / ToS note: every post is a short AI-written summary + a link + the
+# source name; feed text is never reposted verbatim. If you add or change a feed,
+# check that source's Terms of Use and any <copyright>/<rights> notice.
+feeds = [
+  # The Hacker News — native /feeds/posts/default 301-redirects to this FeedBurner
+  # URL, so we target FeedBurner directly to avoid the extra hop.
+  "https://feeds.feedburner.com/TheHackersNews",
+  "https://krebsonsecurity.com/feed/",                                 # Krebs on Security (full-text)
+  "https://www.securityweek.com/feed/",                                # SecurityWeek
+  "https://www.infosecurity-magazine.com/rss/news/",                   # Infosecurity Magazine
+  "https://www.schneier.com/feed/atom/",                               # Schneier on Security (Atom)
+  "https://www.cybersecuritydive.com/feeds/news/",                     # Cybersecurity Dive
+  "https://www.darkreading.com/rss.xml",                               # Dark Reading
+  "https://www.bleepingcomputer.com/feed/",                            # BleepingComputer
+  "https://www.theregister.com/security/headlines.atom",               # The Register — Security (full-text)
+  "https://arstechnica.com/security/feed/",                            # Ars Technica — Security
+  "https://spectrum.ieee.org/feeds/topic/artificial-intelligence.rss", # IEEE Spectrum — AI topic (full-text)
+]
+
+# Ignore articles whose publication date is older than this many days. The dedup
+# ledger (post-then-mark) means a missed/degraded day is auto-recovered on the next
+# run as long as the article is still inside this window — keep it comfortably wide.
+lookback_days = 7
+
+[output]
+# Language for the generated summaries posted to Discord ("ja", "en", ...).
+language = "ja"
+
+# Number of candidate articles per LLM judging call. Candidates are split into
+# chunks of this size and judged in separate calls — smaller chunks keep each prompt
+# focused and isolate failures. There is no post cap; the feed already bounds the
+# candidate count, so every relevant (AI-security) article is posted.
+llm_batch_size = 8
