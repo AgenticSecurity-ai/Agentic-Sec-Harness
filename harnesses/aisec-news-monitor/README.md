@@ -44,6 +44,56 @@ Untrusted feed text never drives system actions. The work is split:
 
 See `skills/aisec-news/SKILL.md` for the full threat model.
 
+## How it works: what's automated, what stays manual
+
+Picture the task a human would otherwise do by hand each morning: **scan a dozen
+security-news sites → skip what you've already seen → pick out only the
+AI/ML-security stories from a flood of general news → classify them → summarize them
+→ post to the team channel → credit the source**. This harness automates most of
+that, but deliberately keeps judgement and source-selection with you. (Compared to
+sifting papers, the heavy lifting here is *noise removal* — most items are ordinary
+security news with no AI angle.)
+
+**Who does each step**
+
+- **AI** — the tool-less LLM judges AI-security relevance, classifies, and writes
+  summaries.
+- **Tool** — the deterministic orchestrator / fetcher does the fetching, posting,
+  dedup ledger, and attribution.
+- **You** — the human judgement and setup that is *not* automated.
+
+**"Human check?"** is flagged **Yes** when a failure is hard to undo (e.g. an
+already-public bad post) OR the output quality varies a lot (judgement / summary
+errors).
+
+| Step (what a human would do) | Who | Human check? | Why |
+|---|:--:|:--:|---|
+| **A.** Decide which sites to follow + check each source's ToS (`news.feeds`) | You | — | Your call; source selection and copyright/ToS judgement are not automated. |
+| **B.** Read each publisher's official RSS/Atom feed | Tool | No | Deterministic; a failed feed self-recovers next run — nothing is lost. |
+| **C.** Track what's already been seen | Tool | No | Deterministic & idempotent — marked seen only after a post succeeds. |
+| **D.** Pick out the AI/ML-security stories from general news | AI | **Yes** | The hardest step — lots of noise, quality varies, mis-judgements happen. |
+| **E.** Classify (Security for AI / AI for Security / Other) | AI | Yes (light) | Can vary, but the impact is limited to a single label. |
+| **F.** Summarize in your own words, ≤140 chars | AI | **Yes** | Varies, can hallucinate, **and** carries copyright risk (verbatim copying) — verify. |
+| **G.** Post to Discord (with the source name) | Tool | No\* | URLs/source name come from trusted data, never the LLM. \*See note. |
+| **H.** Append the source/copyright attribution | Tool | No | Always added once per posting run; cannot be forgotten. |
+| **I.** Confirm the post & retry tomorrow | Tool | No | Only successful posts are marked; failures retry — never a silent loss. |
+
+> **\*Note on step G — there is no human-in-the-loop before posting.** The posting
+> *mechanism* is safe (it builds the message from trusted metadata, not LLM
+> output), but the *content* it posts depends on the AI's steps D–F. Discord posts
+> are public and effectively irreversible, so today the human check on D–F is a
+> **post-hoc review** (read the channel, fix mistakes) — not an approval gate. If
+> you need to catch errors *before* they go public, add an approval step before G
+> (e.g. post drafts to a staging channel and publish only after review).
+
+Two things are intentionally **not** automated: **which sources to follow and their
+copyright/ToS** (step A) and **final responsibility for the AI's judgement** (steps
+D–F). The security model above is what makes the rest safe to run unattended —
+because the summarizing agent has no tools, a prompt injection hidden in a feed item
+can at worst corrupt one summary string; it can never reach the fetch, the post, or
+the ledger. The copyright posture (summarize-and-link, never repost verbatim) is
+enforced in the orchestrator, not left to the model — see the next section.
+
 ## Copyright / source terms
 
 This harness is built to respect the publisher's rights:
