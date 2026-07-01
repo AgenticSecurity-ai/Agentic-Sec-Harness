@@ -1,0 +1,21 @@
+# Runtime dedup ledger — ships empty, fills on the host. Never commit finding ids.
+state/seen.json
+# Signed evidence log — runtime audit trail, host-specific. Never commit.
+state/evidence.log
+*.tmp
+__pycache__/
+
+# Per-deployment env overrides (channel id, agent id, AWS profile). .env.example is committed.
+.env
+
+# Prowler scan output captured at runtime (may contain resource names / arns).
+prowler-output/
+
+# Host-specific state OpenClaw creates at registration/run. Not for distribution.
+.openclaw/
+openclaw-workspace-state.json
+
+# Template files OpenClaw re-scaffolds on `agents add`; not part of this harness.
+USER.md
+TOOLS.md
+HEARTBEAT.md
