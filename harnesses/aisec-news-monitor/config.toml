@@ -23,6 +23,7 @@
 # source name; feed text is never reposted verbatim. If you add or change a feed,
 # check that source's Terms of Use and any <copyright>/<rights> notice.
 feeds = [
+  # ── Security news sites ──────────────────────────────────────────────────
   # The Hacker News — native /feeds/posts/default 301-redirects to this FeedBurner
   # URL, so we target FeedBurner directly to avoid the extra hop.
   "https://feeds.feedburner.com/TheHackersNews",
@@ -36,6 +37,34 @@ feeds = [
   "https://www.theregister.com/security/headlines.atom",               # The Register — Security (full-text)
   "https://arstechnica.com/security/feed/",                            # Ars Technica — Security
   "https://spectrum.ieee.org/feeds/topic/artificial-intelligence.rss", # IEEE Spectrum — AI topic (full-text)
+
+  # ── Big-tech / platform security blogs (all full-text feeds) ─────────────
+  "https://www.microsoft.com/en-us/security/blog/feed/",               # Microsoft Security Blog
+  "https://feeds.feedburner.com/GoogleOnlineSecurityBlog",             # Google Security Blog (Atom; security.googleblog.com 302s here)
+  "https://aws.amazon.com/blogs/security/feed/",                       # AWS Security Blog
+  "https://blog.cloudflare.com/rss/",                                  # Cloudflare Blog (all-topics; the LLM judge drops non-AI)
+
+  # ── Cybersecurity vendor / threat-intel blogs (all full-text feeds) ──────
+  "https://research.checkpoint.com/feed/",                             # Check Point Research
+  "https://blog.talosintelligence.com/rss/",                           # Cisco Talos
+  "https://www.sentinelone.com/labs/feed/",                            # SentinelLabs
+  "https://www.wiz.io/feed/rss.xml",                                   # Wiz (feed carries "all rights reserved"; we post summary + link only)
+  "https://www.zscaler.com/blogs/feeds/security-research",             # Zscaler ThreatLabz (security-research category)
+  "https://securelist.com/feed/",                                      # Kaspersky Securelist
+  "https://www.tenable.com/blog/feed",                                 # Tenable
+  "https://www.rapid7.com/blog/rss/",                                  # Rapid7
+  "https://www.recordedfuture.com/feed",                              # Recorded Future
+
+  # ── AI-security specialist blogs (all full-text feeds) ───────────────────
+  "https://adversa.ai/feed/",                                          # Adversa AI
+  "https://embracethered.com/blog/index.xml",                          # Embrace The Red (Johann Rehberger)
+  "https://blog.trailofbits.com/feed/",                                # Trail of Bits (broad appsec; the judge keeps AI-only)
+  "https://genai.owasp.org/feed/",                                     # OWASP GenAI Security Project
+  "https://www.knostic.ai/blog/rss.xml",                               # Knostic
+  "https://simonwillison.net/tags/llms.atom",                          # Simon Willison — LLM tag (Atom)
+  "https://developer.nvidia.com/blog/tag/ai-red-team/feed/",           # NVIDIA AI Red Team (Atom)
+  "https://bishopfox.com/feeds/blog.rss",                              # Bishop Fox (broad offsec; the judge keeps AI-only)
+  "https://blog.huntr.com/rss/",                                       # Protect AI / huntr (low cadence)
 ]
 
 # Ignore articles whose publication date is older than this many days. The dedup

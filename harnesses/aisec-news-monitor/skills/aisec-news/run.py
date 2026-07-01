@@ -77,6 +77,7 @@ VALID_CATEGORIES = ("Security for AI", "AI for Security", "Other")
 # Every post links to the original and names its source (copyright posture: a short
 # summary + link + attribution, never a full-text repost). Add a row when adding a feed.
 SOURCES = {
+    # Security news sites
     "thehackernews.com": "The Hacker News",
     "krebsonsecurity.com": "Krebs on Security",
     "securityweek.com": "SecurityWeek",
@@ -88,6 +89,31 @@ SOURCES = {
     "theregister.com": "The Register",
     "arstechnica.com": "Ars Technica",
     "spectrum.ieee.org": "IEEE Spectrum",
+    # Big-tech / platform security blogs
+    "microsoft.com": "Microsoft Security Blog",
+    "security.googleblog.com": "Google Security Blog",
+    "aws.amazon.com": "AWS Security Blog",
+    "blog.cloudflare.com": "Cloudflare Blog",
+    # Cybersecurity vendor / threat-intel blogs
+    "research.checkpoint.com": "Check Point Research",
+    "blog.talosintelligence.com": "Cisco Talos",
+    "sentinelone.com": "SentinelLabs",
+    "wiz.io": "Wiz",
+    "zscaler.com": "Zscaler ThreatLabz",
+    "securelist.com": "Kaspersky Securelist",
+    "tenable.com": "Tenable",
+    "rapid7.com": "Rapid7",
+    "recordedfuture.com": "Recorded Future",
+    # AI-security specialist blogs
+    "adversa.ai": "Adversa AI",
+    "embracethered.com": "Embrace The Red",
+    "trailofbits.com": "Trail of Bits",
+    "genai.owasp.org": "OWASP GenAI",
+    "knostic.ai": "Knostic",
+    "simonwillison.net": "Simon Willison",
+    "developer.nvidia.com": "NVIDIA AI Red Team",
+    "bishopfox.com": "Bishop Fox",
+    "huntr.com": "Protect AI (huntr)",
 }
 
 
