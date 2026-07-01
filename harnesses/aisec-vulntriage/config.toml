@@ -1,0 +1,77 @@
+# Copyright (C) 2026 Isao Takaesu
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# ============================================================================
+# aisec-vulntriage configuration
+# Committed shared defaults only (scan scope, language, caps, thresholds) — no
+# secrets, no per-deployment state. Deployment-specific values (the Discord
+# channel id, the AWS profile, etc.) go in a git-ignored .env (copy .env.example),
+# NOT here.
+# AWS credentials and the Discord bot token are configured in OpenClaw / the host
+# credential chain (see ../../docs/HOST-SETUP.md), never in this workspace.
+#
+# SECURITY: this harness is READ-ONLY by construction. It authenticates to AWS
+# with a read-only role (SecurityAudit + ViewOnlyAccess) and never mutates the
+# account. Nothing in this file can grant write access. See DESIGN.md §3.
+# ============================================================================
+
+[aws]
+# Regions Prowler scans. Empty list = Prowler's default (all enabled regions),
+# which is slower and noisier; scope this to the regions you actually use.
+regions = ["us-east-1"]
+
+# Optional AWS named profile. Usually left empty here and supplied via .env
+# (VULNTRIAGE_AWS_PROFILE) or the host's default credential chain. The role this
+# resolves to MUST be read-only (SecurityAudit + ViewOnlyAccess) — the harness's
+# safety guarantee is enforced by IAM, not by this config.
+profile = ""
+
+[prowler]
+# Pinned Prowler CLI. The collector runs `prowler --version` and refuses to run if
+# the installed version does not start with this string (supply-chain hygiene: a
+# surprise upgrade can change output shape). Set to the major series ("5.") to
+# allow patch drift, or a full version ("5.5.0") to pin exactly. Empty = skip check.
+version = "5."
+
+# Scope of checks. Empty lists mean Prowler defaults. Narrower scope = faster runs
+# and less noise for the triage LLM to sort. See `prowler aws --list-services`.
+services = ["ec2", "s3", "iam", "rds", "lambda"]   # AWS services to scan
+compliance = []                                     # e.g. ["cis_3.0_aws"]; empty = all checks
+
+# Which finding statuses to collect from Prowler's output. FAIL is what needs
+# triage; PASS/MANUAL/INFO are dropped. (Prowler status_code values.)
+statuses = ["FAIL"]
+
+# Keep only findings at or above these Prowler-assigned severities. This is a
+# coarse pre-filter before the LLM triage; the LLM still re-prioritizes using
+# KEV/EPSS/exposure (a low-severity misconfig on an internet-exposed asset can be
+# escalated). Valid: critical, high, medium, low, informational.
+severities = ["critical", "high", "medium"]
+
+[enrich]
+# Free public intel feeds used to enrich any CVE ids referenced by a finding.
+# (Prowler CSPM findings are mostly misconfigurations and often carry no CVE; CVE
+# coverage broadens in roadmap stage 3 when Trivy is added — see DESIGN §8.)
+kev = true    # CISA Known Exploited Vulnerabilities catalog membership (single fetch)
+epss = true   # FIRST EPSS exploit-probability score (batched API)
+nvd = false   # NVD CVSS metadata. OFF by default: NVD's unauthenticated rate limit
+              # (5 req / 30s) makes many-CVE runs slow. KEV + EPSS already give the
+              # decisive triage signals. Enable only if you need CVSS in the rationale.
+
+[triage]
+# Forward-looking guardrails consumed by run.py (the triage step), not the
+# collector. The LLM assigns priority, but deterministic code can floor it so a
+# clearly-dangerous finding is never labelled low: recall on High matters more than
+# precision (a missed High is worse than an over-flagged Medium — see DESIGN §5).
+kev_forces_at_least = "High"   # any KEV-listed CVE floors priority to at least this
+epss_high_threshold = 0.5      # EPSS >= this floors priority to at least High
+exposure_forces_at_least = "High"  # internet-exposed finding floors to at least this
+
+[output]
+# Language for the generated triage rationale posted to Discord ("ja", "en", ...).
+language = "ja"
+
+# Number of findings per LLM triage call. Findings are split into chunks of this
+# size and judged in separate, stateless `openclaw agent` calls — smaller chunks
+# keep each prompt focused and isolate failures (a bad chunk retries next run
+# without sinking the whole run).
+llm_batch_size = 8
