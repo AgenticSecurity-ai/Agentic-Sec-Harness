@@ -289,8 +289,37 @@ any edit breaks the chain (tamper-evident). The signature is **pluggable**:
 - **none** — chain-only when no key is set. The hash chain still makes the log
   tamper-evident; it is just unsigned (a one-time warning is emitted).
 
-Signing-key management (where the key lives / rotates, and a future move to Sigstore
-Rekor keyless signing) is an open design decision — see `DESIGN.md` §3.5 / §10.
+Two distinct properties, so you know what you're getting:
+
+- **Tamper-evidence** comes from the **hash chain** and is always on, with no key and
+  no dependencies — any edit to a committed entry breaks the chain and `evidence.py
+  verify` catches it.
+- **Non-repudiation** (a third party can prove a verdict came from this harness and
+  wasn't altered) needs the **ECDSA** mode — only an asymmetric signature gives it.
+  HMAC is integrity-only (the verifier holds the same secret that signs, so it can't
+  prove authorship to anyone else); the chain alone stops edits but not a full-log
+  rewrite by someone who can recompute every hash.
+
+**Signing key management (v1): local PEM.** To turn on ECDSA, generate a P-256 key and
+point `VULNTRIAGE_EVIDENCE_EC_KEY` at it (install `cryptography` first):
+
+```bash
+openssl ecparam -name prime256v1 -genkey -noout -out ~/.secrets/vulntriage-evidence.pem
+chmod 600 ~/.secrets/vulntriage-evidence.pem
+export VULNTRIAGE_EVIDENCE_EC_KEY=~/.secrets/vulntriage-evidence.pem
+```
+
+Keep the key with your **host's other secrets — never in this directory** (convention
+#3). Verifiers use the corresponding public key (`openssl ec -in <key> -pubout`).
+
+> **⚠ Limit of the local-PEM path — do not over-trust it.** A key on this host means
+> **host compromise ⇒ signature forgery**: an attacker who steals the key can rewrite
+> the log and re-sign it, and the signature then proves nothing *against that
+> attacker*. So v1 signing raises the bar for outsiders and gives honest operators
+> tamper-evidence — but it is **not** non-repudiation against a host-level breach.
+> True non-repudiation requires an off-host signing authority (**AWS KMS**, or
+> **Sigstore keyless + a Rekor** transparency log) — the **roadmap stage-3** target,
+> not shipped in v1. See `DESIGN.md` §3.5 / §8.
 
 ## How it stays idempotent
 

@@ -110,8 +110,13 @@ Two more deterministic guardrails reinforce this:
   The authoritative danger signals are collector facts.
 - **The signed evidence log** records *which inputs (by digest) → what priority →
   what rationale* in a hash-chained, tamper-evident trail, so "who decided what, on
-  what basis" is auditable after the fact. The chain is stdlib SHA-256 (always on);
-  the signature is pluggable (see `evidence.py`).
+  what basis" is auditable after the fact. The chain is stdlib SHA-256 (always on) and
+  gives tamper-evidence with no key; the signature is a decided three-tier scheme
+  (ECDSA P-256 / HMAC-SHA256 / none), `sig_alg`-labelled so a downgrade is visible
+  (see `evidence.py`). Honest limit: v1's ECDSA key is a **local PEM**, so host
+  compromise ⇒ forgery — v1 signing is tamper-evidence, not non-repudiation against a
+  host breach. Off-host signing (KMS, or Sigstore keyless + Rekor) is roadmap stage 3
+  (`DESIGN.md` §3.5 / §8).
 
 > **Scope boundary — where this stops being B2.** v1 is Phase 1–3 + 7 (collect →
 > enrich → triage → report/evidence), **read-only**. Execution (Phase 4–6: decide →
