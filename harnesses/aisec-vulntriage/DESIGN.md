@@ -115,9 +115,60 @@ The design reserves a hard line for when execution is added:
 
 Phase 7 writes an **append-only, hash-chained evidence log**: for each triage
 verdict, a record of *which inputs (digested) → what priority → what rationale*,
-chained (SHA-256) and signed (ECDSA P-256). This is the auditable "who decided what,
-on what basis" trail. v1 self-implements the hash-chain + signature; posting to a
-public transparency log (Sigstore Rekor) is a later option, not required for v1.
+chained (SHA-256) and, when a key is configured, signed. This is the auditable "who
+decided what, on what basis" trail.
+
+**Two properties, delivered by two mechanisms** — keep them distinct:
+
+- **Tamper-evidence** is provided by the **hash chain**, always, with zero
+  dependencies. Any *edit* to a committed entry breaks the chain and is detected by
+  `verify()`. Caveat: the chain alone only stops *edits*; an attacker who can rewrite
+  the **whole** log (recompute every hash from a forged point forward) is stopped only
+  by a signature over a key they don't hold.
+- **Non-repudiation** (third-party-verifiable "this verdict came from this harness and
+  was not altered") requires an **asymmetric signature** over each entry hash. This is
+  what a real audit wants and what only ECDSA (below) provides.
+
+**Signing is pluggable — a three-tier scheme, decided for v1:**
+
+1. **ECDSA P-256** — used when the `cryptography` package is importable **and**
+   `VULNTRIAGE_EVIDENCE_EC_KEY` points to a PEM EC private key. Asymmetric →
+   **third-party verifiable** (holder of the public key verifies; only the private
+   key signs). This is the audit-grade mode §3.5 targets.
+2. **HMAC-SHA256** — stdlib fallback when `VULNTRIAGE_EVIDENCE_KEY` (a shared secret)
+   is set but ECDSA is unavailable. Tamper-evident **to a holder of the secret**, but
+   the verifier *is* the forger (symmetric) → **no non-repudiation**. It is a genuine
+   integrity check, not audit-grade signing, and `sig_alg` says so — we never dress
+   HMAC up as ECDSA.
+3. **none** — chain-only when no key is configured (**the default**). The chain still
+   makes edits evident; the log is simply unsigned and a one-time warning is emitted.
+
+Deliberately not "always sign": stdlib-only portability (repo convention) forbids
+requiring `cryptography`, and forcing a shared secret by default would create a
+key-management burden for users who only need tamper-evidence. Honest `sig_alg`
+labelling means a downgrade is always visible to an auditor.
+
+**Key management (v1 decision).** The one hard part of signing is not the algorithm,
+it is **where the private key lives**.
+
+- **v1 = local PEM on the host.** `VULNTRIAGE_EVIDENCE_EC_KEY` names a PEM file the
+  operator generates and protects (filesystem perms; never committed — it lives with
+  the host's other secrets, per convention #3, not in this directory). Simple, no cloud
+  dependency, works offline.
+- **Its limit, documented not hidden:** a local PEM means **host compromise ⇒ signature
+  forgery**. An attacker with the key (and the append-only log) can rewrite history and
+  re-sign it; the signature then proves nothing against that attacker. So the v1
+  signature raises the bar for *outsiders* and gives *tamper-evidence for honest
+  operators*, but is **not** non-repudiation against a host-level compromise. This
+  limitation is stated in `README.md` and `evidence.py` so no one over-trusts it.
+- **The robust answers are deferred, on purpose.** True non-repudiation needs the
+  signing authority off the host: (a) **KMS-delegated signing** (AWS KMS asymmetric
+  key — the private key never leaves the HSM), or (b) **Sigstore keyless + a Rekor
+  transparency log** (short-lived OIDC-bound cert + public append-only log, so even the
+  operator cannot silently rewrite history). Both add dependencies (AWS reach / network
+  + Sigstore) that a walking skeleton should not require. v1 ships the simple local-PEM
+  path; **Sigstore keyless + Rekor is the roadmap stage-3 target** (§8), with KMS as an
+  alternative if staying inside AWS is preferred.
 
 ### 3.6 License hygiene
 
@@ -234,8 +285,11 @@ the digest to the signed record.
    Read-only, B2-preserving, tier-1 tools only.
 2. **+ Graph context** — add Cartography(+Neo4j); triage rationale gains exposure
    paths / blast radius (the toxic-combination value). Still read-only, still B2.
-3. **+ More collectors** — Trivy (ECR image CVEs; then agentless EC2 snapshot scan),
-   DefectDojo as system of record, Sigstore Rekor for public transparency.
+3. **+ More collectors & audit-grade evidence** — Trivy (ECR image CVEs; then
+   agentless EC2 snapshot scan), DefectDojo as system of record, and **Sigstore
+   keyless + a Rekor transparency log** to move evidence signing off the host — the
+   non-repudiation the v1 local-PEM path deliberately does not provide (§3.5). KMS-
+   delegated signing is the in-AWS alternative.
 4. **Phase 4–6 (execution)** — *this* is where the architecture escalates beyond B2:
    the tool-less orchestrator model gives way to **agentic tool_call** with tier-2
    mutating tools, and the governance the report specifies becomes load-bearing —
@@ -263,8 +317,14 @@ the digest to the signed record.
   without it; exposure context is approximated by the `internet_exposed` /
   `asset_criticality` flags in the triage schema (§5), accepting that path-based
   "toxic combination" rationale waits for stage 2.
-- **Evidence signing key management.** Where the ECDSA key lives / rotates for the
-  self-implemented VAT before (if ever) moving to Sigstore keyless + Rekor.
+- ~~**Evidence signing key management.**~~ **Resolved (§3.5).** Signing is a decided
+  three-tier pluggable scheme — ECDSA P-256 (opt-in, third-party verifiable) / HMAC-
+  SHA256 (stdlib fallback, integrity-only) / none (default, chain-only + warn), with an
+  honest `sig_alg` label. Key management for v1 = **local PEM** on the host
+  (`VULNTRIAGE_EVIDENCE_EC_KEY`), with the host-compromise-⇒-forgery limit documented,
+  not hidden. True non-repudiation (off-host signing authority) is deferred: **Sigstore
+  keyless + Rekor is the roadmap stage-3 target** (§8), KMS-delegated signing an
+  in-AWS alternative.
 - **Prowler invocation.** Pinned CLI subprocess vs library; which check packs
   (CIS / exposure) are on by default in `config.toml`.
 - **Reviewer surface.** v1 posts to Discord (post-hoc review, like the monitors). If

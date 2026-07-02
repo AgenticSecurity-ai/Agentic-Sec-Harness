@@ -9,19 +9,28 @@ auditable "who decided what, on what basis" trail. A reader can verify the chain
 end-to-end (tamper-evident) and, when a signing key is configured, verify each
 entry's signature.
 
-Stdlib only for the chain. The signature is PLUGGABLE (v1 walking skeleton; the
-signing-key management is an open design decision — DESIGN.md §10):
+Stdlib only for the chain. The signature is a DECIDED three-tier pluggable scheme
+(DESIGN.md §3.5 / §10) — `sig_alg` on every entry names the tier honestly so a
+downgrade is always visible to an auditor:
 
   * ECDSA P-256  — used when the `cryptography` package is importable AND
-    VULNTRIAGE_EVIDENCE_EC_KEY points to a PEM EC private key. This is the mode
-    DESIGN §3.5 targets (asymmetric → third-party verifiable). Roadmap: keyless
-    signing + a Sigstore Rekor transparency log (DESIGN §8).
+    VULNTRIAGE_EVIDENCE_EC_KEY points to a PEM EC private key. Asymmetric →
+    third-party verifiable; this is the audit-grade mode DESIGN §3.5 targets.
   * HMAC-SHA256  — stdlib fallback when VULNTRIAGE_EVIDENCE_KEY (a shared secret)
-    is set but ECDSA is unavailable. Tamper-evident to anyone holding the key;
-    NOT third-party verifiable. Labelled honestly as such in `sig_alg`.
-  * none         — chain-only when no key is configured. The hash chain still
-    makes the log tamper-EVIDENT (any edit breaks the chain); it is just not
-    signed. A one-time warning is emitted.
+    is set but ECDSA is unavailable. Tamper-evident to a holder of the secret, but
+    the verifier IS the forger (symmetric) → integrity-only, NOT non-repudiation.
+    Labelled honestly as such in `sig_alg`; never dressed up as ECDSA.
+  * none         — chain-only when no key is configured (the DEFAULT). The hash
+    chain still makes the log tamper-EVIDENT (any edit breaks the chain); it is
+    just not signed. A one-time warning is emitted.
+
+Key management (v1 decision): the ECDSA key is a LOCAL PEM on the host, named by
+VULNTRIAGE_EVIDENCE_EC_KEY and kept with the host's other secrets (never in the repo,
+convention #3). Known limit — a local key means host compromise ⇒ signature forgery:
+an attacker holding the key can rewrite and re-sign the log, so v1 signing is NOT
+non-repudiation against a host-level breach. True non-repudiation needs an off-host
+signing authority (AWS KMS, or Sigstore keyless + a Rekor transparency log) — the
+roadmap stage-3 target (DESIGN §8), not shipped here.
 
 The log is JSON Lines (one entry per line, append-only) at state/evidence.log.
 Each entry:
