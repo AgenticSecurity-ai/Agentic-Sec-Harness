@@ -47,6 +47,7 @@ import re
 import sys
 import json
 import time
+import base64
 import random
 import shutil
 import argparse
@@ -173,6 +174,71 @@ def http_get_json(url):
                 time.sleep(delay)
                 continue
             raise
+
+
+# --------------------------------------------------------------------------- #
+# Neo4j / Cartography graph context (stage 2, DESIGN §12)                      #
+#                                                                              #
+# The asset graph lives in Neo4j, populated by Cartography (an external CLI, in #
+# the same "external tool" category as Prowler — see DESIGN §12.3). We query it #
+# over Neo4j's HTTP transactional Cypher endpoint using pure-stdlib urllib +    #
+# basic-auth, deliberately NOT the third-party `neo4j` bolt driver, to keep the #
+# harness stdlib-only. This is orchestrator work: the returned facts are        #
+# collector-authoritative (never LLM-authored), exactly like KEV/EPSS.         #
+# --------------------------------------------------------------------------- #
+class Neo4jError(RuntimeError):
+    """Neo4j returned a Cypher/statement error, or the endpoint was unreachable
+    after retries. Callers degrade gracefully (graph facts become unavailable and
+    findings fall back to the v1 keyword exposure flag — DESIGN §12.4)."""
+
+
+def neo4j_cypher(endpoint, user, password, statement, params=None,
+                 database="neo4j"):
+    """Run one Cypher statement over Neo4j's HTTP transactional endpoint and return
+    its rows as a list of dicts (column name -> value). Bounded retry on transient
+    HTTP failures (same backoff as the intel feeds); raises Neo4jError on a Cypher
+    error or exhausted retries so the caller can degrade."""
+    url = f"{endpoint.rstrip('/')}/db/{database}/tx/commit"
+    body = json.dumps({"statements": [
+        {"statement": statement, "parameters": params or {}}]}).encode("utf-8")
+    token = base64.b64encode(f"{user}:{password}".encode()).decode()
+    req = urllib.request.Request(url, data=body, method="POST", headers={
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Authorization": f"Basic {token}",
+        "User-Agent": USER_AGENT,
+    })
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as r:
+                doc = json.loads(r.read().decode("utf-8", errors="replace"))
+            break
+        except urllib.error.HTTPError as e:
+            # 401/403 (bad creds) and other 4xx are not retried — fail fast.
+            if e.code in RETRYABLE_STATUS and attempt < MAX_RETRIES:
+                delay = _retry_delay(attempt, e)
+                _log(f"[warn] neo4j HTTP {e.code}; retry "
+                     f"{attempt + 1}/{MAX_RETRIES} in {delay:.1f}s")
+                time.sleep(delay)
+                continue
+            raise Neo4jError(f"neo4j HTTP {e.code} at {url}: {e.reason}")
+        except (urllib.error.URLError, TimeoutError) as e:
+            if attempt < MAX_RETRIES:
+                delay = _retry_delay(attempt)
+                _log(f"[warn] neo4j {type(e).__name__} ({e}); retry "
+                     f"{attempt + 1}/{MAX_RETRIES} in {delay:.1f}s")
+                time.sleep(delay)
+                continue
+            raise Neo4jError(f"neo4j unreachable at {url}: {e}")
+    else:  # pragma: no cover - loop always breaks or raises above
+        raise Neo4jError(f"neo4j request to {url} exhausted retries")
+
+    if doc.get("errors"):
+        first = doc["errors"][0]
+        raise Neo4jError(f"cypher error {first.get('code')}: {first.get('message')}")
+    result = (doc.get("results") or [{}])[0]
+    cols = result.get("columns", [])
+    return [dict(zip(cols, row.get("row", []))) for row in result.get("data", [])]
 
 
 # --------------------------------------------------------------------------- #
@@ -433,6 +499,137 @@ def enrich(items, cfg):
 
 
 # --------------------------------------------------------------------------- #
+# graph facts — exposure_path / blast_radius (stage 2, DESIGN §12.1/§12.4)     #
+#                                                                              #
+# Deterministic Cypher over the Cartography graph turns v1's keyword exposure  #
+# GUESS into a graph-derived FACT, and grounds excess-privilege with a real    #
+# blast-radius signal. These facts are collector-authoritative (like KEV/EPSS) #
+# and — in stage 2.3 — will extend the deterministic priority floor. Stage 2.2 #
+# (this code) builds the query capability + Cypher; the `graph-check` command   #
+# exercises it. Wiring into the floor/rationale/schema is stage 2.3.           #
+# --------------------------------------------------------------------------- #
+OPEN_CIDR = "0.0.0.0/0"
+
+
+def graph_key(resource_uid):
+    """Return (arn, fallback_id) join keys for a Prowler resource uid, per the S2.1
+    validation (DESIGN §12.8). The uid is normally the ARN (primary key); the
+    fallback id is its last path component (`…/i-abc` -> `i-abc`, `…/sg-abc` ->
+    `sg-abc`), which is how Cartography keys EC2 instances/security-groups — they
+    carry no `arn` property, so an ARN-only join would silently drop them."""
+    uid = resource_uid or ""
+    arn = uid if uid.startswith("arn:") else ""
+    tail = uid.split("/")[-1] if "/" in uid else uid.split(":")[-1]
+    return arn, tail
+
+
+def _empty_facts():
+    return {
+        "joined": False, "join_by": None, "node_labels": [],
+        "exposure_path": {"exposed": None, "reasons": []},
+        "blast_radius": None,
+    }
+
+
+def graph_facts(graph_cfg, password, findings):
+    """Query the Cartography graph for exposure_path + blast_radius facts for each
+    finding's resource, keyed as in graph_key(). Returns {finding_id: facts}. Raises
+    Neo4jError if the graph is unreachable (the caller degrades — findings keep the
+    v1 keyword exposure flag, DESIGN §12.4). A resource that simply isn't in the
+    graph gets `joined=False` and no graph facts — the same graceful degrade."""
+    endpoint = graph_cfg.get("neo4j_http_endpoint", "http://localhost:7474")
+    user = graph_cfg.get("neo4j_user", "neo4j")
+    database = graph_cfg.get("neo4j_database", "neo4j")
+
+    def q(stmt, **params):
+        return neo4j_cypher(endpoint, user, password, stmt, params, database)
+
+    arns = sorted({a for f in findings if (a := graph_key(f["resource"])[0])})
+    ids = sorted({graph_key(f["resource"])[1] for f in findings
+                  if graph_key(f["resource"])[1]})
+
+    # 1) node resolution — which keys actually exist in the graph, and as what.
+    arn_labels, id_labels = {}, {}
+    for row in q("UNWIND $arns AS a MATCH (n {arn:a}) RETURN a AS key, labels(n) AS l",
+                 arns=arns):
+        arn_labels.setdefault(row["key"], row["l"])
+    for row in q("UNWIND $ids AS i MATCH (n {id:i}) RETURN i AS key, labels(n) AS l",
+                 ids=ids):
+        id_labels.setdefault(row["key"], row["l"])
+
+    # 2) exposure inputs (bulk).
+    open_sgs = {r["key"] for r in q(
+        "MATCH (:IpRange {id:$cidr})-[:MEMBER_OF_IP_RULE]->(:IpPermissionInbound)"
+        "-[:MEMBER_OF_EC2_SECURITY_GROUP]->(sg:EC2SecurityGroup) "
+        "RETURN DISTINCT sg.id AS key", cidr=OPEN_CIDR)}
+    ec2 = {r["key"]: r for r in q(
+        "UNWIND $ids AS iid MATCH (i:EC2Instance {id:iid}) "
+        "OPTIONAL MATCH (i)-[:MEMBER_OF_EC2_SECURITY_GROUP]->(sg:EC2SecurityGroup)"
+        "<-[:MEMBER_OF_EC2_SECURITY_GROUP]-(:IpPermissionInbound)"
+        "<-[:MEMBER_OF_IP_RULE]-(:IpRange {id:$cidr}) "
+        "RETURN iid AS key, i.publicipaddress AS public_ip, count(DISTINCT sg) AS open_sg",
+        ids=ids, cidr=OPEN_CIDR)}
+    s3 = {r["key"]: r for r in q(
+        "UNWIND $arns AS a MATCH (b:S3Bucket {arn:a}) RETURN a AS key, "
+        "coalesce(b.anonymous_access,false) AS anon, "
+        "coalesce(b.block_public_acls,false) AS bpa, "
+        "coalesce(b.restrict_public_buckets,false) AS rpb", arns=arns)}
+
+    # 3) blast radius — for resources that ARE an IAM principal (role/user). Without
+    # the opt-in permission_relationships mapping the graph has no CAN_ACCESS edges to
+    # specific resources, so we use the strongest available proxy: wildcard-privilege
+    # policy statements attached to the principal (DESIGN §12.8 records this limit).
+    blast = {r["key"]: r for r in q(
+        "UNWIND $arns AS a MATCH (pr) WHERE pr.arn=a AND (pr:AWSRole OR pr:AWSUser) "
+        "OPTIONAL MATCH (pr)-[:POLICY]->(:AWSPolicy)-[:STATEMENT]->"
+        "(s:AWSPolicyStatement {effect:'Allow'}) "
+        "WITH a, collect(s) AS ss RETURN a AS key, "
+        "size([x IN ss WHERE any(act IN x.action WHERE act='*')]) AS star, "
+        "size([x IN ss WHERE any(act IN x.action WHERE act ENDS WITH ':*')]) AS wild, "
+        "size(ss) AS allow", arns=arns)}
+
+    out = {}
+    for f in findings:
+        arn, fid_key = graph_key(f["resource"])
+        facts = _empty_facts()
+        if arn and arn in arn_labels:
+            facts["joined"], facts["join_by"], facts["node_labels"] = True, "arn", arn_labels[arn]
+        elif fid_key and fid_key in id_labels:
+            facts["joined"], facts["join_by"], facts["node_labels"] = True, "id", id_labels[fid_key]
+
+        reasons = []
+        # exposure: EC2 instance (public IP and/or open ingress), open SG, public S3.
+        if fid_key in ec2:
+            row = ec2[fid_key]
+            if row.get("public_ip"):
+                reasons.append(f"public_ip:{row['public_ip']}")
+            if (row.get("open_sg") or 0) > 0:
+                reasons.append("open_ingress_sg")
+        if fid_key in open_sgs:
+            reasons.append("open_ingress_sg")
+        if arn in s3:
+            row = s3[arn]
+            if row.get("anon"):
+                reasons.append("s3_anonymous_access")
+            if not (row.get("bpa") and row.get("rpb")):
+                reasons.append("s3_public_access_block_incomplete")
+        if facts["joined"]:
+            facts["exposure_path"]["reasons"] = reasons
+            facts["exposure_path"]["exposed"] = bool(reasons)
+
+        if arn in blast:
+            row = blast[arn]
+            facts["blast_radius"] = {
+                "admin_like": (row.get("star") or 0) > 0,
+                "star_action_stmts": row.get("star") or 0,
+                "wildcard_service_stmts": row.get("wild") or 0,
+                "allow_stmt_count": row.get("allow") or 0,
+            }
+        out[f["id"]] = facts
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # commands                                                                     #
 # --------------------------------------------------------------------------- #
 def _severity_allowed(item, cfg):
@@ -525,6 +722,73 @@ def cmd_seen_count(seen_path):
     print(len(load_seen(seen_path)))
 
 
+def _findings_from_raw(raw, cfg):
+    """Status/severity-filter + normalize + de-dup raw OCSF records into findings
+    (the same pipeline cmd_collect uses, minus the ledger)."""
+    by_id = {}
+    for rec in raw:
+        if not _status_allowed(rec, cfg):
+            continue
+        item = normalize(rec)
+        if item is None or not _severity_allowed(item, cfg):
+            continue
+        by_id.setdefault(item["id"], item)
+    return list(by_id.values())
+
+
+def cmd_graph_check(cfg, prowler_bin, aws_profile, prowler_output):
+    """Stage-2.2 validation tool: resolve each finding to its Cartography node and
+    print the graph-derived exposure_path / blast_radius facts. Read-only; does NOT
+    touch the ledger, post, or change triage — that wiring is stage 2.3."""
+    graph_cfg = cfg.get("graph", {})
+    password = os.environ.get("VULNTRIAGE_NEO4J_PASSWORD", "")
+    if prowler_output:
+        _log(f"[graph-check] reading captured Prowler output {prowler_output}")
+        raw = _read_ocsf(prowler_output)
+    else:
+        raw = run_prowler(cfg, prowler_bin, aws_profile)
+    findings = _findings_from_raw(raw, cfg)
+    _log(f"[graph-check] {len(findings)} finding(s) after status/severity filter")
+
+    try:
+        facts = graph_facts(graph_cfg, password, findings)
+    except Neo4jError as e:
+        _log(f"[graph-check] graph unavailable ({e}); findings would degrade to the "
+             "v1 keyword exposure flag (DESIGN §12.4)")
+        return 1
+
+    joined = exposed = admin = 0
+    rows = []
+    for f in findings:
+        gf = facts.get(f["id"], _empty_facts())
+        if gf["joined"]:
+            joined += 1
+        exp = gf["exposure_path"]["exposed"]
+        if exp:
+            exposed += 1
+        br = gf["blast_radius"]
+        if br and br["admin_like"]:
+            admin += 1
+        rows.append((f, gf, exp, br))
+
+    print(f"graph-check: {len(findings)} findings | joined to graph: {joined} "
+          f"| exposure_path=true: {exposed} | admin-like blast: {admin}")
+    print("-" * 100)
+    for f, gf, exp, br in rows:
+        jb = gf["join_by"] or "-"
+        label = (gf["node_labels"] or ["(unjoined)"])[0]
+        exp_s = {True: "EXPOSED", False: "no", None: "?"}[exp]
+        reasons = ",".join(gf["exposure_path"]["reasons"]) or "-"
+        blast_s = "-"
+        if br:
+            blast_s = (f"admin={br['admin_like']} star={br['star_action_stmts']} "
+                       f"wild={br['wildcard_service_stmts']} allow={br['allow_stmt_count']}")
+        print(f"[{f['resource_type']:22s}] join={jb:3s} {label:20s} "
+              f"exposure={exp_s:7s} ({reasons}) blast[{blast_s}]")
+        print(f"    {f['resource'][:96]}")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="aisec-vulntriage collector (Prowler + KEV/EPSS/NVD, read-only)")
@@ -543,6 +807,14 @@ def main():
     p_mark = sub.add_parser("mark")
     p_mark.add_argument("ids", nargs="+")
     sub.add_parser("seen-count")
+    p_graph = sub.add_parser(
+        "graph-check",
+        help="Stage-2.2 validation: print graph-derived exposure_path / blast_radius "
+             "facts per finding (read-only; needs a Cartography-populated Neo4j and "
+             "VULNTRIAGE_NEO4J_PASSWORD). Does not post or touch the ledger.")
+    p_graph.add_argument(
+        "--prowler-output", default=None,
+        help="Read this captured Prowler JSON-OCSF file/dir instead of running Prowler.")
     args = ap.parse_args()
 
     if args.cmd == "collect":
@@ -556,6 +828,12 @@ def main():
         cmd_mark(args.ids, args.state)
     elif args.cmd == "seen-count":
         cmd_seen_count(args.state)
+    elif args.cmd == "graph-check":
+        cfg = load_config(args.config)
+        prowler_bin = os.environ.get("PROWLER_BIN", "prowler")
+        aws_profile = (os.environ.get("VULNTRIAGE_AWS_PROFILE")
+                       or cfg.get("aws", {}).get("profile", "") or "")
+        sys.exit(cmd_graph_check(cfg, prowler_bin, aws_profile, args.prowler_output))
 
 
 if __name__ == "__main__":

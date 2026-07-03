@@ -115,3 +115,20 @@ detail_top_n = 12
 # findings are ever shown). Trade-off: the chosen day does one extra re-triage of every
 # open finding and posts a burst of Critical/High messages — pick a low-traffic weekday.
 full_digest_weekday = "mon"
+
+[graph]
+# Stage 2 graph context (Cartography + Neo4j) — see DESIGN.md §12. OFF by default:
+# v1 users are unaffected and the harness keeps using the keyword exposure flag. When
+# enabled, the collector reads deterministic exposure_path / blast_radius facts from a
+# Cartography-populated Neo4j and (stage 2.3) uses them to ground the priority floor.
+# Still READ-ONLY and B2-preserving: Cartography (an external CLI, like Prowler) builds
+# the graph from the SAME read-only role; the collector only QUERIES it over Neo4j's
+# HTTP Cypher endpoint with stdlib urllib (no bolt driver). The Neo4j password is a
+# SECRET and lives in the environment (VULNTRIAGE_NEO4J_PASSWORD), never here or in .env.
+enabled = false
+
+# Neo4j HTTP transactional Cypher endpoint. Bind Neo4j to localhost only — the graph is
+# a sensitive map of your asset topology and must never be network-exposed (DESIGN §12.3).
+neo4j_http_endpoint = "http://localhost:7474"
+neo4j_user = "neo4j"
+neo4j_database = "neo4j"
