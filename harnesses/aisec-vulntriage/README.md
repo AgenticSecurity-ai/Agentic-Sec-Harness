@@ -120,7 +120,11 @@ model above is what makes the rest safe to run unattended.
   (enable Discord Developer Mode → right-click channel → Copy Channel ID).
 - **Prowler installed** on the host and on `PATH` (or point `PROWLER_BIN` at it). The
   collector pins the major version — see `[prowler].version` in `config.toml` (default
-  `"5."`). Install per Prowler's docs (e.g. `pipx install prowler`).
+  `"5."`). Install per Prowler's docs (e.g. `pipx install prowler`). For an unattended
+  cron deployment, prefer a **dedicated venv at a stable path** (one that survives
+  shell/tmp cleanup, e.g. `~/.local/share/aisec-vulntriage/prowler-venv`) and point
+  `PROWLER_BIN` at its `prowler` binary — `pipx`/`PATH` also work, but a pinned venv
+  keeps the scheduled run from breaking if `PATH` or a scratch install changes.
 - **A read-only AWS role/credentials** the host can assume, granting **`SecurityAudit`
   + `ViewOnlyAccess`** and **nothing that mutates**. This is the harness's outer
   safety guarantee — do **not** give it write permissions. Supply it via the host
