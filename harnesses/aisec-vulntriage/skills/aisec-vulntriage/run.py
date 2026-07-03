@@ -28,6 +28,7 @@ import sys
 import time
 import json
 import subprocess
+from datetime import datetime
 
 import evidence  # sibling module (same skill dir)
 
@@ -94,19 +95,37 @@ def progress(msg):
     print(msg, file=sys.stderr, flush=True)
 
 
+_WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def is_full_digest_day(output_cfg):
+    """True if today (host-local) is [output].full_digest_weekday — the weekly full
+    re-digest that re-surfaces ALL open findings, not just new ones. Empty or invalid
+    disables it. Matches on the first 3 letters so 'mon' and 'monday' both work, and
+    uses the weekday INDEX (not %a) to stay locale-independent."""
+    want = str(output_cfg.get("full_digest_weekday", "")).strip().lower()[:3]
+    if want not in _WEEKDAYS:
+        return False
+    return _WEEKDAYS[datetime.now().weekday()] == want
+
+
 def load_config():
     import tomllib
     with open(CONFIG, "rb") as f:
         return tomllib.load(f)
 
 
-def run_collect():
+def run_collect(include_seen=False):
     # stderr is NOT captured: collect.py streams Prowler progress + intel-feed
     # retry/backoff straight to the console / cron log so a run is never silent.
-    # Only stdout (the JSON result) is captured.
+    # Only stdout (the JSON result) is captured. include_seen=True (weekly full
+    # re-digest) tells collect to emit every open finding, not just unseen ones.
+    cmd = [sys.executable, COLLECT, "collect"]
+    if include_seen:
+        cmd.append("--include-seen")
     try:
         out = subprocess.run(
-            [sys.executable, COLLECT, "collect"],
+            cmd,
             stdout=subprocess.PIPE, text=True, timeout=COLLECT_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:
@@ -116,7 +135,11 @@ def run_collect():
         sys.exit("[error] collect failed (see collect progress above); "
                  "nothing marked, will retry next run")
     data = json.loads(out.stdout)
-    progress(f"[..] collect returned {data['new_count']} new finding(s)")
+    if data.get("include_seen"):
+        progress(f"[..] collect returned {len(data.get('items', []))} open finding(s) "
+                 f"({data['new_count']} new) for full re-digest")
+    else:
+        progress(f"[..] collect returned {data['new_count']} new finding(s)")
     return data
 
 
@@ -317,7 +340,7 @@ def post_per_finding(channel_id, records, log):
     return posted
 
 
-def post_digest(channel_id, records, output_cfg, log):
+def post_digest(channel_id, records, output_cfg, log, full=False):
     """Post a bounded digest: a header (counts by priority) + the top-N most-urgent
     detail-eligible findings, ONE finding per Discord message. One-per-message is
     deliberate — OpenClaw's Discord send path re-chunks a long message and would split
@@ -328,16 +351,27 @@ def post_digest(channel_id, records, output_cfg, log):
     priorities) is represented by the header — still triaged, signed into the evidence
     log, and marked seen; review those via the evidence log or Prowler directly.
 
+    full=True is the weekly full re-digest (config full_digest_weekday): `records`
+    then covers ALL currently-open findings (new + already-seen), detail_top_n is
+    ignored so EVERY detail-eligible (Critical/High) finding is posted individually,
+    and the header counts every open finding. This re-surfaces still-open findings the
+    ledger would otherwise keep hidden forever. It is display-only — post-then-mark
+    still marks new findings and harmlessly re-marks already-seen ones (idempotent);
+    nothing is un-marked, so a resolved finding is never re-posted.
+
     Post-then-mark is preserved: a finding is returned (markable) only if the message
     that REPRESENTS it posted OK — the header for header-represented findings, its own
     message for shown ones. A failed message leaves those findings unmarked to retry.
     """
     detail_set = {p for p in output_cfg.get("detail_priorities", ["Critical", "High"])
                   if p in _RANK}
-    try:
-        top_n = max(0, int(output_cfg.get("detail_top_n", 12)))
-    except (TypeError, ValueError):
-        top_n = 12
+    if full:
+        top_n = len(records)  # weekly full re-digest: no cap, show every Critical/High
+    else:
+        try:
+            top_n = max(0, int(output_cfg.get("detail_top_n", 12)))
+        except (TypeError, ValueError):
+            top_n = 12
     # Most-urgent first → the cap keeps the highest-priority findings.
     records = sorted(records, key=lambda r: _RANK.get(r[2], 0), reverse=True)
     counts = {p: 0 for p in PRIORITIES}
@@ -352,10 +386,16 @@ def post_digest(channel_id, records, output_cfg, log):
     header_reps = [fid for fid, _, _, _ in records if fid not in shown_ids]
 
     counts_line = "  ".join(f"{_PRI_EMOJI[p]} {p}: {counts.get(p, 0)}" for p in PRIORITIES)
-    lines = [f"🛡️ **aisec-vulntriage — 新規 findings: {len(records)}**", counts_line]
+    title = (f"🛡️ **aisec-vulntriage — 週次フル再掲: open findings {len(records)} 件**"
+             if full else
+             f"🛡️ **aisec-vulntriage — 新規 findings: {len(records)}**")
+    lines = [title, counts_line]
     if shown:
-        tail = f"（詳細対象 {len(detailed)} 件中）" if overflow > 0 else ""
-        lines.append(f"↓ 優先度上位 {len(shown)} 件を個別表示{tail}")
+        if full:
+            lines.append(f"↓ Critical/High {len(shown)} 件を全件個別表示（未解消の全 open）")
+        else:
+            tail = f"（詳細対象 {len(detailed)} 件中）" if overflow > 0 else ""
+            lines.append(f"↓ 優先度上位 {len(shown)} 件を個別表示{tail}")
     else:
         lines.append("（個別表示対象なし — 件数のみ）")
     if overflow > 0:
@@ -394,12 +434,19 @@ def main():
         sys.exit("[error] no Discord channel configured — set VULNTRIAGE_CHANNEL_ID "
                  "in .env (copy .env.example) or export it in the environment.")
 
+    output_cfg = cfg.get("output", {})
+    full_digest = is_full_digest_day(output_cfg)
+    if full_digest:
+        progress("[..] weekly full re-digest day — re-surfacing ALL open findings "
+                 "(ignoring detail_top_n); the seen ledger is left untouched.")
+
     progress("[..] collecting read-only cloud posture (Prowler + KEV/EPSS)…")
-    collected = run_collect()
+    collected = run_collect(include_seen=full_digest)
     items = collected.get("items", [])
     if not items:
-        print("[ok] no new findings; nothing to do.")
+        print("[ok] no findings to triage; nothing to do.")
         return
+    new_count = collected.get("new_count", len(items))
     by_id = {it["id"]: it for it in items}
 
     batch_size = max(1, int(cfg.get("output", {}).get("llm_batch_size", 8)))
@@ -460,10 +507,10 @@ def main():
         })
         records.append((fid, item, priority, rationale))
 
-    # Post: digest (compact, avoids a per-finding flood) unless disabled.
-    output_cfg = cfg.get("output", {})
+    # Post: digest (compact, avoids a per-finding flood) unless disabled. On the weekly
+    # full re-digest day, post_digest re-surfaces every open Critical/High individually.
     if bool(output_cfg.get("digest", True)):
-        posted = post_digest(channel_id, records, output_cfg, log)
+        posted = post_digest(channel_id, records, output_cfg, log, full=full_digest)
     else:
         posted = post_per_finding(channel_id, records, log)
 
@@ -474,8 +521,9 @@ def main():
     if to_mark:
         subprocess.run([sys.executable, COLLECT, "mark", *to_mark], timeout=60)
 
-    print(f"[ok] collected={len(items)} chunks={len(chunks)} posted={len(posted)} "
-          f"dropped={len(dropped)} deferred={deferred} marked={len(to_mark)}")
+    print(f"[ok] full_digest={full_digest} collected={len(items)} new={new_count} "
+          f"chunks={len(chunks)} posted={len(posted)} dropped={len(dropped)} "
+          f"deferred={deferred} marked={len(to_mark)}")
 
 
 if __name__ == "__main__":

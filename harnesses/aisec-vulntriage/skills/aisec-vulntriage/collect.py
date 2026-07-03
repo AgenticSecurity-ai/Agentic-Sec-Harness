@@ -24,10 +24,13 @@ SECURITY (DESIGN.md §3):
     ever sees them. This collector does not interpret finding text as instructions.
 
 Subcommands:
-  collect                 Print JSON {generated_at, new_count, items:[...]} of NEW
-                          (unseen) findings. Runs Prowler unless --prowler-output
-                          is given (then it reads that captured OCSF file instead —
-                          a read-only dry run with no AWS calls).
+  collect                 Print JSON {generated_at, new_count, total_count,
+                          include_seen, items:[...]} of NEW (unseen) findings. Runs
+                          Prowler unless --prowler-output is given (then it reads that
+                          captured OCSF file instead — a read-only dry run with no AWS
+                          calls). With --include-seen it emits EVERY currently-open
+                          finding (each tagged "seen") for the weekly full re-digest;
+                          this changes only what is EMITTED, never the ledger.
   mark <id> [<id>...]     Record finding ids as handled (call AFTER a successful
                           post, per the post-then-mark ledger contract).
   seen-count              Print how many finding ids are currently recorded as seen.
@@ -447,7 +450,8 @@ def _status_allowed(rec, cfg):
     return rec.get("status_code", "") in wanted
 
 
-def cmd_collect(cfg, seen_path, prowler_bin, aws_profile, prowler_output):
+def cmd_collect(cfg, seen_path, prowler_bin, aws_profile, prowler_output,
+                include_seen=False):
     seen = load_seen(seen_path)
 
     if prowler_output:
@@ -474,7 +478,18 @@ def cmd_collect(cfg, seen_path, prowler_bin, aws_profile, prowler_output):
     fresh = [it for it in items if it["id"] not in seen]
     _log(f"[collect] {len(fresh)} NEW finding(s) after dedup ledger")
 
-    fresh = enrich(fresh, cfg)
+    # Normally emit only the NEW findings. On a weekly full re-digest run (--include-seen)
+    # emit EVERY currently-open finding so the orchestrator can re-surface still-open
+    # findings the ledger would otherwise keep hidden forever. This changes only what is
+    # EMITTED — the ledger is not touched here; mark is still driven by post-then-mark.
+    emit = items if include_seen else fresh
+    for it in emit:
+        it["seen"] = it["id"] in seen
+    if include_seen:
+        _log(f"[collect] --include-seen: emitting all {len(emit)} open finding(s) "
+             f"({len(fresh)} new, {len(emit) - len(fresh)} already-seen) for full re-digest")
+
+    emit = enrich(emit, cfg)
 
     # Sort so the most urgent surface first: KEV-listed, then higher EPSS, then
     # internet-exposed, then Prowler severity. (Deterministic ordering only — the
@@ -487,12 +502,14 @@ def cmd_collect(cfg, seen_path, prowler_bin, aws_profile, prowler_output):
             1 if it["internet_exposed"] else 0,
             sev_rank.get(it["severity"], 0),
         )
-    fresh.sort(key=_key, reverse=True)
+    emit.sort(key=_key, reverse=True)
 
     print(json.dumps({
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "new_count": len(fresh),
-        "items": fresh,
+        "total_count": len(items),
+        "include_seen": include_seen,
+        "items": emit,
     }, ensure_ascii=False, indent=2))
 
 
@@ -519,6 +536,10 @@ def main():
         "--prowler-output", default=None,
         help="Read this captured Prowler JSON-OCSF file/dir instead of running "
              "Prowler (read-only dry run; no AWS calls).")
+    p_collect.add_argument(
+        "--include-seen", action="store_true",
+        help="Emit EVERY currently-open finding (each tagged \"seen\"), not just "
+             "unseen ones, for the weekly full re-digest. Does not touch the ledger.")
     p_mark = sub.add_parser("mark")
     p_mark.add_argument("ids", nargs="+")
     sub.add_parser("seen-count")
@@ -529,7 +550,8 @@ def main():
         prowler_bin = os.environ.get("PROWLER_BIN", "prowler")
         aws_profile = (os.environ.get("VULNTRIAGE_AWS_PROFILE")
                        or cfg.get("aws", {}).get("profile", "") or "")
-        cmd_collect(cfg, args.state, prowler_bin, aws_profile, args.prowler_output)
+        cmd_collect(cfg, args.state, prowler_bin, aws_profile, args.prowler_output,
+                    include_seen=args.include_seen)
     elif args.cmd == "mark":
         cmd_mark(args.ids, args.state)
     elif args.cmd == "seen-count":

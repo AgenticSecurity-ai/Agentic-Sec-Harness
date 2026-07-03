@@ -100,3 +100,18 @@ detail_priorities = ["Critical", "High"]
 # findings are still triaged, signed into the evidence log, and marked seen — review
 # them via the evidence log or Prowler directly.
 detail_top_n = 12
+
+# Weekly full re-digest. On normal days digest mode shows only NEW (unseen) findings
+# and folds the rest into header counts, so a still-open finding that was already
+# reported — and therefore marked seen — is never re-surfaced (the ledger assumes you
+# consult Prowler directly for those). That means a still-open Medium, or any Critical/
+# High past detail_top_n, can stay invisible indefinitely. To counter that, on the
+# weekday named here (mon/tue/wed/thu/fri/sat/sun, host-local time) the run re-digests
+# ALL currently-open findings — not just new ones — ignoring detail_top_n and posting
+# every Critical/High individually, so nothing open stays hidden for more than a week.
+# This is DISPLAY scope only: the seen ledger is left untouched (already-seen findings
+# stay seen, are never un-marked, and are not re-posted on normal days), so it never
+# re-posts something you've resolved and never breaks dedup. Empty = disabled (only new
+# findings are ever shown). Trade-off: the chosen day does one extra re-triage of every
+# open finding and posts a burst of Critical/High messages — pick a low-traffic weekday.
+full_digest_weekday = "mon"

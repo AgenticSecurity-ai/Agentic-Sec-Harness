@@ -71,7 +71,17 @@ for the full rationale; this file is the operational summary.
    building the message from TRUSTED collector metadata (asset, check id, CVE id,
    KEV/EPSS/exposure) plus the LLM's priority + rationale summary. The LLM never
    echoes ids or URLs; the summary is hard-clipped as a safety net. Once per posting
-   run it appends the disclaimer + the evidence-log chain head.
+   run it appends the disclaimer + the evidence-log chain head. In **digest mode**
+   (`output.digest`, default on) posting is bounded to a header (counts by priority) +
+   the top `detail_top_n` Critical/High findings posted individually — one finding per
+   message so OpenClaw's Discord path can't split a block mid-rationale — so channel
+   volume stays ~N+2 regardless of finding count; the rest are represented by the
+   header (still triaged and signed). Because header-represented and overflow findings
+   are marked seen and never re-surface on normal runs, `output.full_digest_weekday`
+   names one weekday on which the run re-digests **all currently-open** findings (new +
+   already-seen, via `collect.py --include-seen`), ignoring `detail_top_n` and posting
+   every open Critical/High individually — display-only, the ledger is untouched so a
+   resolved finding is never re-posted.
 6. `collect.py mark` records (successfully-posted) + (agent-dropped) finding ids. A
    finding whose post FAILED, or every finding in a chunk that failed to parse, is
    left unmarked, so it retries next run — never a silent loss.

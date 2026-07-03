@@ -281,16 +281,47 @@ the digest to the signed record.
 
 ## 8. Roadmap (phased evolution)
 
-1. **v1 (this doc)** — Prowler + feeds + AI triage + Discord + signed evidence log.
-   Read-only, B2-preserving, tier-1 tools only.
-2. **+ Graph context** — add Cartography(+Neo4j); triage rationale gains exposure
+Four stages, each an explicit escalation. Stages 1–3 are read-only and preserve B2
+(tool-less LLM + deterministic orchestrator); stage 4 is the deliberate break, where
+mutation forces agentic tools and load-bearing governance. The stage-level plan is
+stable; the sub-milestone checklist under stage 1 is the live progress view.
+
+Status legend: ✅ done · 🟡 in progress / unmerged · ⏳ planned, not started.
+Sub-milestone status is current as of 2026-07-03 (see the repo-root `STATUS.md` for
+the cross-harness session log; this checklist is the vulntriage-specific roadmap view).
+
+1. **v1 — walking skeleton** (this doc) — Prowler + feeds + AI triage + Discord +
+   signed evidence log. Read-only, B2-preserving, tier-1 tools only. Sub-milestones:
+   - ✅ **S1.1 Design** — v1 scope (Phase 1–3 + 7) + this DESIGN.md (PR #13)
+   - ✅ **S1.2 Core** — `collect.py` / `evidence.py` / `run.py`; deterministic priority
+     floor; hash-chained evidence log (PR #14)
+   - ✅ **S1.3 Persona + distribution docs** — AGENTS / SOUL / IDENTITY / SKILL /
+     README, three-layer threat model (PR #15)
+   - ✅ **S1.4 Signing scheme finalized** — 3-tier pluggable (ECDSA P-256 / HMAC /
+     none); key management v1 = local PEM; off-host non-repudiation deferred to
+     stage 3 (PR #16; see §3.5, §10)
+   - ✅ **S1.5 Live end-to-end verification** — real Prowler v5 scan → tool-less triage
+     → Discord post → evidence verify, confirmed by reading the channel (verification
+     only, no PR)
+   - ✅ **S1.6 Digest mode** — bound Discord volume to ~N+2 messages regardless of
+     finding count; fix invalid `lambda` → `awslambda` service name (PR #17)
+   - 🟡 **S1.7 Weekly full re-digest** — `output.full_digest_weekday` re-surfaces ALL
+     currently-open findings (via `collect.py --include-seen`), countering the digest
+     "permanent invisibility" of header-represented / overflow findings; display-only,
+     the ledger is untouched (branch `vulntriage-weekly-full-digest`; implemented +
+     offline-verified, unmerged)
+   - ⏳ **S1.8 Operational hardening** — persistent Prowler install (off the volatile
+     scratchpad venv), dedicated read-only role (SecurityAudit + ViewOnlyAccess), cron
+     job, evidence signing key provisioned
+   - ⏳ **S1.9 v0.1 OSS release**
+2. ⏳ **+ Graph context** — add Cartography(+Neo4j); triage rationale gains exposure
    paths / blast radius (the toxic-combination value). Still read-only, still B2.
-3. **+ More collectors & audit-grade evidence** — Trivy (ECR image CVEs; then
+3. ⏳ **+ More collectors & audit-grade evidence** — Trivy (ECR image CVEs; then
    agentless EC2 snapshot scan), DefectDojo as system of record, and **Sigstore
    keyless + a Rekor transparency log** to move evidence signing off the host — the
    non-repudiation the v1 local-PEM path deliberately does not provide (§3.5). KMS-
    delegated signing is the in-AWS alternative.
-4. **Phase 4–6 (execution)** — *this* is where the architecture escalates beyond B2:
+4. ⏳ **Phase 4–6 (execution)** — *this* is where the architecture escalates beyond B2:
    the tool-less orchestrator model gives way to **agentic tool_call** with tier-2
    mutating tools, and the governance the report specifies becomes load-bearing —
    **human approval gate + AI Gateway (LiteLLM/Portkey) + ACS fail-closed policy at
