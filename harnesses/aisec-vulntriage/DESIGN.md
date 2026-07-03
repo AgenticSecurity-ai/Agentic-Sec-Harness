@@ -305,15 +305,26 @@ the cross-harness session log; this checklist is the vulntriage-specific roadmap
      only, no PR)
    - ✅ **S1.6 Digest mode** — bound Discord volume to ~N+2 messages regardless of
      finding count; fix invalid `lambda` → `awslambda` service name (PR #17)
-   - 🟡 **S1.7 Weekly full re-digest** — `output.full_digest_weekday` re-surfaces ALL
+   - ✅ **S1.7 Weekly full re-digest** — `output.full_digest_weekday` re-surfaces ALL
      currently-open findings (via `collect.py --include-seen`), countering the digest
      "permanent invisibility" of header-represented / overflow findings; display-only,
-     the ledger is untouched (branch `vulntriage-weekly-full-digest`; implemented +
-     offline-verified, unmerged)
-   - ⏳ **S1.8 Operational hardening** — persistent Prowler install (off the volatile
-     scratchpad venv), dedicated read-only role (SecurityAudit + ViewOnlyAccess), cron
-     job, evidence signing key provisioned
-   - ⏳ **S1.9 v0.1 OSS release**
+     the ledger is untouched (PR #18)
+   - 🟡 **S1.8 Operational hardening** — autonomous operation started; one optional
+     item remains.
+     - ✅ Persistent Prowler install off the volatile scratchpad venv — dedicated venv
+       at a stable path (`~/.local/share/aisec-vulntriage/prowler-venv`) wired via
+       `PROWLER_BIN`.
+     - ✅ Dedicated read-only role — `aisec-vulntriage-readonly` (SecurityAudit +
+       ViewOnlyAccess + `prowler-additions`), assumed via a named profile; runbook in
+       README Appendix (PR #19).
+     - ✅ Cron job — `vulntriage-weekday` (weekdays 08:00 JST, Monday = weekly full
+       re-digest); smoke-verified end-to-end under the read-only role, then enabled.
+     - ⏳ Evidence signing key (**optional**, deferred) — default `sig_alg=none`
+       (chain-only, tamper-evident). Set `VULNTRIAGE_EVIDENCE_EC_KEY` for audit-grade
+       ECDSA signing when/if non-repudiation is needed; may be picked up later.
+   - ✅ **S1.9 v0.1 OSS release** — read-only, B2-preserving walking skeleton declared
+     v0.1; release-prep docs finalized (`.env.example` documents the recommended
+     read-only named profile + stable-path Prowler venv; README/DESIGN progress synced).
 2. ⏳ **+ Graph context** — add Cartography(+Neo4j); triage rationale gains exposure
    paths / blast radius (the toxic-combination value). Still read-only, still B2.
 3. ⏳ **+ More collectors & audit-grade evidence** — Trivy (ECR image CVEs; then
