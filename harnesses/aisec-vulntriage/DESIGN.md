@@ -325,8 +325,22 @@ the cross-harness session log; this checklist is the vulntriage-specific roadmap
    - ✅ **S1.9 v0.1 OSS release** — read-only, B2-preserving walking skeleton declared
      v0.1; release-prep docs finalized (`.env.example` documents the recommended
      read-only named profile + stable-path Prowler venv; README/DESIGN progress synced).
-2. ⏳ **+ Graph context** — add Cartography(+Neo4j); triage rationale gains exposure
+2. 🟡 **+ Graph context** — add Cartography(+Neo4j); triage rationale gains exposure
    paths / blast radius (the toxic-combination value). Still read-only, still B2.
+   Detailed design in **§12**. Sub-milestones:
+   - 🟡 **S2.0 Design annex** — §12: IAM diff (existing read-only role suffices),
+     Neo4j-over-HTTP to keep stdlib-only, Prowler↔Cartography join-key design, B2
+     preservation, sub-milestones.
+   - ⏳ **S2.1 Join validation** — real Cartography sync under `aisec-vulntriage-readonly`
+     (verify zero `AccessDenied`); measure ARN join hit-rate per resource type vs the S1.5
+     Prowler output; document per-type join + fallbacks.
+   - ⏳ **S2.2 Neo4j HTTP query helper** — `collect.py` `urllib` Cypher client + exposure /
+     blast-radius queries.
+   - ⏳ **S2.3 Wire graph facts** — into the finding schema, §5 rationale, and priority
+     floor; graph `exposure_path` replaces the keyword `internet_exposed` (keyword kept as
+     the degrade path).
+   - ⏳ **S2.4 Config/docs** — graph toggle (default off), `.env`/host wiring
+     (`CARTOGRAPHY_BIN`, Neo4j endpoint + credentials), README/SKILL updates.
 3. ⏳ **+ More collectors & audit-grade evidence** — Trivy (ECR image CVEs; then
    agentless EC2 snapshot scan), DefectDojo as system of record, and **Sigstore
    keyless + a Rekor transparency log** to move evidence signing off the host — the
@@ -381,3 +395,140 @@ orchestration design (Cartography / Prowler / Trivy / DefectDojo / Sigstore; AI
 Gateway; ACS / ASSERT / AGT governance). This harness is the v1 slice of that report:
 read-only, B2-preserving, walking-skeleton scope, with the report's agentic/governance
 machinery placed on the roadmap for the execution phases.
+
+## 12. Stage 2 design annex — graph context (Cartography + Neo4j)
+
+> **Status: design draft for stage 2 — not implemented.** This annex is the detailed
+> expansion of roadmap item **§8.2** ("+ Graph context"). Stage 1 (v1) shipped without
+> it; this is the design a future implementer builds against. Stage 2 stays **read-only
+> and B2-preserving** — it adds *inputs*, not tools or mutation.
+
+### 12.1 What graph context buys
+
+v1 approximates exposure with a keyword heuristic: `internet_exposed` is `true` when the
+Prowler `check_id`/`title` contains an exposure hint word (see `collect.py`
+`EXPOSURE_HINTS`). That is a proxy for the *check topic*, **not** a claim about the real
+network/IAM path to the specific resource. The report's headline differentiator —
+**toxic combinations** (a resource that is *publicly reachable* **and** *over-privileged*
+**and** carries a *KEV-listed / high-EPSS* CVE) — needs a **path**, not a flag.
+
+Cartography ingests the account into a Neo4j graph (assets as nodes, network/IAM
+relationships as edges). Deterministic Cypher over that graph turns the flag into a
+fact:
+
+- **`exposure_path`** — is there an actual path from an internet-facing entry
+  (IGW → public subnet / public IP / `0.0.0.0/0` security-group ingress, or a public
+  S3 bucket policy) to this resource? Replaces the keyword guess with a graph-derived
+  answer.
+- **`blast_radius`** — what can this resource's IAM principal reach (count / criticality
+  of reachable sensitive nodes)? Grounds `excess_privilege`, which v1 leaves entirely to
+  the LLM.
+- **`toxic_combination`** — the conjunction `exposure_path ∧ over_privileged ∧ (KEV ∨
+  high-EPSS)`. When true, it is the strongest deterministic signal we have.
+
+These are **collector-authoritative facts**, computed by the orchestrator — exactly like
+KEV/EPSS today (§3.5, §5). They extend the deterministic **priority floor** (Layer 3): a
+graph-confirmed toxic combination floors priority to Critical, and a compromised LLM
+cannot talk it down. The LLM's role is unchanged — it still only sees findings-as-DATA
+and returns JSON.
+
+### 12.2 IAM — the read-only role already suffices (key finding)
+
+Cartography's documented requirement for its AWS sync is the **`SecurityAudit`** managed
+policy ("grants access to read security config metadata"). The existing S1.8 role
+`aisec-vulntriage-readonly` already attaches **`SecurityAudit` + `ViewOnlyAccess` +
+`prowler-additions`**, so:
+
+| Cartography needs | Covered by | Status |
+|---|---|---|
+| `SecurityAudit` (baseline) | attached directly | ✅ present |
+| `ec2:DescribeRegions` (region enumeration) | `SecurityAudit` / `ViewOnlyAccess` `ec2:Describe*` | ✅ present |
+| `ecr:DescribePullThroughCacheRules` | `prowler-additions` `ecr:Describe*` | ✅ present |
+| `inspector2:*` read (Inspector module only) | — (`AmazonInspector2ReadOnlyAccess`) | ⏳ optional; only if the Inspector sync is enabled |
+
+**Result: no new IAM is required for Cartography's default AWS sync, and none of it
+mutates.** The outer safety guarantee (Layer 1, §3.1) extends to stage 2 *for free* — the
+graph is built from the same read-only credentials. The only gap is the optional
+`inspector2` module; keep it **off by default** so the role stays unchanged, and document
+`AmazonInspector2ReadOnlyAccess` as the opt-in for users who enable it. This must still be
+**verified empirically** (S2.1) against a real Cartography sync — "no `AccessDenied` in
+the sync log," the same acceptance bar used for the Prowler read-only dry run.
+
+### 12.3 Neo4j deployment + the stdlib-only constraint
+
+- **How it runs.** Neo4j is an **external service** (local Docker, `neo4j` official
+  image), and Cartography is an **external CLI tool** — the same category as Prowler
+  (`PROWLER_BIN`), *not* a Python import into the harness. So the orchestrator invokes
+  `cartography` via subprocess (a new `CARTOGRAPHY_BIN`) after the Prowler collect, and
+  Neo4j holds the derived graph.
+- **stdlib-only is preserved** (repo convention) by **not** using the `neo4j` bolt driver
+  (third-party). `collect.py` queries Neo4j over its **HTTP Cypher API** with `urllib`
+  (basic-auth header + JSON body/response) — the same shape as the existing
+  `http_get_json` used for KEV/EPSS/NVD. External tools do the heavy lifting; harness
+  scripts stay pure-stdlib.
+- **The graph is derived + ephemeral.** It is fully re-syncable from the account, so
+  there is no backup burden and no state to protect beyond secrets. Bind Neo4j to
+  **localhost only** — the graph is a sensitive map of your asset topology and must not be
+  network-exposed. The Neo4j password is a **secret** → host credential chain / env, never
+  `.env` (which is non-secret only, convention #3).
+- **License note (decided — acceptable).** Cartography is Apache-2.0 (clean). **Neo4j
+  Community Edition is GPLv3.** Because Neo4j runs as a *separate process* accessed over
+  bolt/HTTP (mere aggregation, like using PostgreSQL), it does **not** impose GPL on the
+  harness's own AGPL/CLA-covered code. Under §3.6 this separate-process posture is
+  **confirmed acceptable**: Neo4j is a user-run external service, not bundled or linked into
+  the shipped path, so the CLA's dual-license path stays clean. (Recorded here rather than
+  re-litigated per stage; Cartography has no non-Neo4j backend, so this is the enabling
+  decision for graph context.)
+
+### 12.4 Join-key design — Prowler finding ↔ Cartography node
+
+The correlation hinges on matching each v1 finding to its graph node. The finding schema
+(`collect.py` `normalize()`) already carries the fields needed: `resource` (OCSF
+`resources[].uid`, typically the **ARN**), `resource_type`, `account`, `region`,
+`resource_name`.
+
+- **Primary key: ARN.** Cartography stores `arn` (and `id`) on most AWS nodes; Prowler's
+  `resources[].uid` is normally the ARN. Join `finding.resource == node.arn`.
+- **Per-type fallback** when ARN is absent or shaped differently (some resource types key
+  on id/name, e.g. S3 by bucket name, EC2 by instance id): fall back to
+  `(account, region, resource_name)` or the bare resource id, keyed by `resource_type`.
+- **Empirical validation is mandatory (S2.1).** The real ARN hit-rate per `resource_type`
+  is not assumable — validate it against the **S1.5 captured real Prowler v5 output** and a
+  real Cartography sync of the same account, and record the per-type join strategy +
+  hit-rate. Findings that don't join degrade gracefully: they keep v1's keyword
+  `internet_exposed` and simply gain no graph facts (same graceful-degrade contract as a
+  down intel feed).
+
+### 12.5 B2 / layering — unchanged
+
+Stage 2 adds **no tools to the LLM and no mutation to AWS.** Cartography sync (subprocess)
+and Cypher queries (deterministic `urllib`) are orchestrator work; the graph-derived
+facts join the *trusted* enrichment metadata (never LLM-authored), and the tool-less LLM
+still receives findings fenced as DATA and returns only the §5 JSON verdict. The new facts
+strengthen the deterministic floor rather than the LLM's discretion — the same
+"determinism overrides the LLM" property that makes v1 safe (Layer 3). All three security
+layers (read-only IAM / tool-less B2 / deterministic-facts-win) hold as-is.
+
+### 12.6 First implementation steps (proposed sub-milestones)
+
+- **S2.1 Join validation (do first, no code shipped).** Run Cartography against the test
+  account under `aisec-vulntriage-readonly`; confirm zero `AccessDenied` (validating
+  §12.2); measure ARN join hit-rate per `resource_type` against the S1.5 Prowler output;
+  document the per-type join + fallbacks.
+- **S2.2 Neo4j HTTP query helper** in `collect.py` (`urllib`, basic-auth) + the Cypher for
+  `exposure_path` / `blast_radius`.
+- **S2.3 Wire graph facts** into the finding schema, the §5 rationale, and the priority
+  floor; replace the keyword `internet_exposed` with the graph-derived `exposure_path`,
+  keeping the keyword as the degrade path when the graph is unavailable.
+- **S2.4 Config/docs.** `config.toml` graph toggle (default **off** so v1 users are
+  unaffected and the harness degrades to keyword exposure), `.env`/host wiring
+  (`CARTOGRAPHY_BIN`, Neo4j HTTP endpoint + credential source), README/SKILL updates.
+
+### 12.7 Open questions (stage 2)
+
+- **ARN join hit-rate** per resource type — empirical (S2.1); drives how much of the graph
+  value actually lands vs. how many findings fall back to the keyword flag.
+- ~~**Neo4j GPLv3**~~ — **resolved**: the separate-process (bolt/HTTP) posture is accepted
+  under §3.6; Neo4j is a user-run external service, not bundled (see §12.3).
+- **Sync cadence** — Cartography sync is heavier than a Prowler scan; decide whether it
+  runs every triage run or on a slower cadence with the graph cached between runs.
