@@ -124,7 +124,10 @@ model above is what makes the rest safe to run unattended.
 - **A read-only AWS role/credentials** the host can assume, granting **`SecurityAudit`
   + `ViewOnlyAccess`** and **nothing that mutates**. This is the harness's outer
   safety guarantee — do **not** give it write permissions. Supply it via the host
-  credential chain or a named profile (`VULNTRIAGE_AWS_PROFILE`).
+  credential chain or a named profile (`VULNTRIAGE_AWS_PROFILE`). A copy-paste
+  provisioning runbook (trust policy, the extra Prowler read permissions those two
+  managed policies miss, and the profile wiring) is in the
+  [Appendix — provisioning the read-only role](#appendix--provisioning-the-read-only-role).
 - Python 3.11+ on the host (stdlib only for the harness; `tomllib` is used). Optional:
   the `cryptography` package if you want ECDSA-signed evidence (see *Evidence log*
   below) — without it the log is still hash-chained and tamper-evident.
@@ -350,6 +353,85 @@ Deliberately deferred (documented, not built): Cartography(+Neo4j) asset-graph
 Sigstore Rekor transparency, and — the hard line — **Phase 4–6 execution** (decide →
 apply → verify), which is where the architecture escalates beyond tool-less B2 to
 gated agentic tool-calling. Full design, rationale, and roadmap: **`DESIGN.md`**.
+
+## Appendix — provisioning the read-only role
+
+The harness's outer safety guarantee is IAM: the credentials it runs under must be
+**read-only**, so a fully-compromised LLM still cannot mutate the account. `SecurityAudit`
++ `ViewOnlyAccess` cover almost everything Prowler reads, but Prowler needs a **handful of
+extra read actions** those two managed policies miss (e.g. `ec2:GetEbsEncryptionByDefault`,
+`s3:GetAccountPublicAccessBlock`, `lambda:GetFunction*`) — without them some checks return
+`AccessDenied` and are silently skipped. This runbook creates a dedicated role assumable by
+your existing admin principal (no new long-lived keys). Replace `<ACCOUNT_ID>` and the admin
+principal ARN with yours; region is passed by the collector (`aws.regions`) so the profile
+region is only for auxiliary calls.
+
+```bash
+mkdir -p ~/aisec-vulntriage-iam && cd ~/aisec-vulntriage-iam
+
+# 1) trust policy — who may assume the role (your admin user/role)
+cat > trust-policy.json <<'JSON'
+{ "Version": "2012-10-17",
+  "Statement": [{ "Effect": "Allow",
+    "Principal": { "AWS": "arn:aws:iam::<ACCOUNT_ID>:user/<your-admin-principal>" },
+    "Action": "sts:AssumeRole" }] }
+JSON
+
+# 2) the extra read actions Prowler needs beyond SecurityAudit + ViewOnlyAccess
+#    (Prowler's published "prowler-additions" set; trim to your scanned services if you like)
+cat > prowler-additions.json <<'JSON'
+{ "Version": "2012-10-17",
+  "Statement": [{ "Sid": "AllowMoreReadForProwler", "Effect": "Allow", "Resource": "*",
+    "Action": [
+      "account:Get*", "appstream:Describe*", "appstream:List*", "backup:List*",
+      "cloudtrail:GetInsightSelectors", "codeartifact:List*", "codebuild:BatchGet*",
+      "cognito-idp:GetUserPoolMfaConfig", "dlm:Get*", "drs:Describe*",
+      "ds:Get*", "ds:Describe*", "ds:List*", "dynamodb:GetResourcePolicy",
+      "ec2:GetEbsEncryptionByDefault", "ec2:GetSnapshotBlockPublicAccessState",
+      "ec2:GetInstanceMetadataDefaults", "ecr:Describe*",
+      "ecr:GetRegistryScanningConfiguration", "elasticfilesystem:DescribeBackupPolicy",
+      "glue:GetConnections", "glue:GetSecurityConfiguration*", "glue:SearchTables",
+      "lambda:GetFunction*", "logs:FilterLogEvents", "macie2:GetMacieSession",
+      "s3:GetAccountPublicAccessBlock", "shield:DescribeProtection",
+      "shield:GetSubscriptionState", "servicecatalog:Describe*", "servicecatalog:List*",
+      "ssm-incidents:List*", "support:Describe*", "tag:GetTagKeys",
+      "wellarchitected:List*" ] }] }
+JSON
+
+# 3) create the role + attach the two managed policies + the additions
+ROLE=aisec-vulntriage-readonly
+aws iam create-role --role-name "$ROLE" \
+  --assume-role-policy-document file://trust-policy.json \
+  --description "Read-only role for aisec-vulntriage (Prowler CSPM scan)"
+aws iam attach-role-policy --role-name "$ROLE" \
+  --policy-arn arn:aws:iam::aws:policy/SecurityAudit
+aws iam attach-role-policy --role-name "$ROLE" \
+  --policy-arn arn:aws:iam::aws:policy/job-function/ViewOnlyAccess
+POLICY_ARN=$(aws iam create-policy --policy-name prowler-additions \
+  --policy-document file://prowler-additions.json --query 'Policy.Arn' --output text)
+aws iam attach-role-policy --role-name "$ROLE" --policy-arn "$POLICY_ARN"
+```
+
+Wire it up as a named profile in `~/.aws/config` (point `source_profile` at whatever
+profile holds your admin creds; use `credential_source = Environment` if they come from
+env vars):
+
+```ini
+[profile vulntriage-readonly]
+role_arn = arn:aws:iam::<ACCOUNT_ID>:role/aisec-vulntriage-readonly
+source_profile = default
+region = us-east-1
+```
+
+Verify before wiring it into `.env` (`VULNTRIAGE_AWS_PROFILE=vulntriage-readonly`):
+
+```bash
+# assumed-role identity resolves (IAM is eventually consistent — retry if it 403s)
+aws sts get-caller-identity --profile vulntriage-readonly
+# read-only dry run: no AccessDenied in the log = permissions sufficient
+VULNTRIAGE_AWS_PROFILE=vulntriage-readonly \
+  python3 skills/aisec-vulntriage/collect.py --state /tmp/vt-role-test.json collect
+```
 
 ## Layout
 
