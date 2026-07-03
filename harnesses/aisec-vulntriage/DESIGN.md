@@ -328,14 +328,16 @@ the cross-harness session log; this checklist is the vulntriage-specific roadmap
 2. 🟡 **+ Graph context** — add Cartography(+Neo4j); triage rationale gains exposure
    paths / blast radius (the toxic-combination value). Still read-only, still B2.
    Detailed design in **§12**. Sub-milestones:
-   - 🟡 **S2.0 Design annex** — §12: IAM diff (existing read-only role suffices),
+   - ✅ **S2.0 Design annex** — §12: IAM diff (existing read-only role suffices),
      Neo4j-over-HTTP to keep stdlib-only, Prowler↔Cartography join-key design, B2
      preservation, sub-milestones.
-   - ⏳ **S2.1 Join validation** — real Cartography sync under `aisec-vulntriage-readonly`
-     (verify zero `AccessDenied`); measure ARN join hit-rate per resource type vs the S1.5
-     Prowler output; document per-type join + fallbacks.
-   - ⏳ **S2.2 Neo4j HTTP query helper** — `collect.py` `urllib` Cypher client + exposure /
-     blast-radius queries.
+   - ✅ **S2.1 Join validation** — real Cartography sync under `aisec-vulntriage-readonly`:
+     only `AccessDenied` is the optional `inspector2` module (§12.2 confirmed); ARN join
+     88% / +id-fallback 97% of real resources; EC2 requires the id fallback. Full results
+     + per-type table in **§12.8**.
+   - ✅ **S2.2 Neo4j HTTP query helper** — `collect.py` `neo4j_cypher()` (stdlib urllib +
+     basic-auth), `graph_facts()` exposure/blast-radius Cypher, `graph-check` command.
+     Verified on the live graph; details + limits in **§12.9**.
    - ⏳ **S2.3 Wire graph facts** — into the finding schema, §5 rationale, and priority
      floor; graph `exposure_path` replaces the keyword `internet_exposed` (keyword kept as
      the degrade path).
@@ -511,12 +513,19 @@ layers (read-only IAM / tool-less B2 / deterministic-facts-win) hold as-is.
 
 ### 12.6 First implementation steps (proposed sub-milestones)
 
-- **S2.1 Join validation (do first, no code shipped).** Run Cartography against the test
-  account under `aisec-vulntriage-readonly`; confirm zero `AccessDenied` (validating
-  §12.2); measure ARN join hit-rate per `resource_type` against the S1.5 Prowler output;
-  document the per-type join + fallbacks.
-- **S2.2 Neo4j HTTP query helper** in `collect.py` (`urllib`, basic-auth) + the Cypher for
-  `exposure_path` / `blast_radius`.
+- ✅ **S2.1 Join validation (do first, no code shipped) — DONE (2026-07-03).** Ran
+  Cartography against the test account under `aisec-vulntriage-readonly`; confirmed the
+  only `AccessDenied` is the optional `inspector2` module, and measured the ARN join
+  hit-rate per `resource_type`. Results, the per-type join + fallback table, and the
+  environment are recorded in **§12.8**. Headline: **ARN-only join 88%, ARN + per-type
+  id fallback 97%** of real resources.
+- ✅ **S2.2 Neo4j HTTP query helper — DONE (2026-07-03).** `collect.py` gains
+  `neo4j_cypher()` (stdlib `urllib` + basic-auth over the HTTP transactional endpoint,
+  bounded retry, `Neo4jError` on failure), `graph_key()` (the S2.1 ARN-primary + id
+  fallback join), `graph_facts()` (the `exposure_path` / `blast_radius` Cypher), and a
+  read-only `graph-check` command that exercises them. Verified on the live graph; the
+  Cypher, results, and the blast-radius limitation are recorded in **§12.9**. Not yet
+  wired into triage (that is S2.3).
 - **S2.3 Wire graph facts** into the finding schema, the §5 rationale, and the priority
   floor; replace the keyword `internet_exposed` with the graph-derived `exposure_path`,
   keeping the keyword as the degrade path when the graph is unavailable.
@@ -526,9 +535,121 @@ layers (read-only IAM / tool-less B2 / deterministic-facts-win) hold as-is.
 
 ### 12.7 Open questions (stage 2)
 
-- **ARN join hit-rate** per resource type — empirical (S2.1); drives how much of the graph
-  value actually lands vs. how many findings fall back to the keyword flag.
+- ~~**ARN join hit-rate** per resource type~~ — **resolved (S2.1, see §12.8)**: ARN alone
+  joins **88%** of real resources; adding the per-type id fallback (ARN tail → Cartography
+  `node.id`, required for EC2 instances/security-groups which carry no `arn` property)
+  raises it to **97%**. The ~3% residue (EIPs Cartography doesn't sync, unattached
+  AWS-managed policies) degrades gracefully to the v1 keyword flag, as designed.
 - ~~**Neo4j GPLv3**~~ — **resolved**: the separate-process (bolt/HTTP) posture is accepted
   under §3.6; Neo4j is a user-run external service, not bundled (see §12.3).
 - **Sync cadence** — Cartography sync is heavier than a Prowler scan; decide whether it
   runs every triage run or on a slower cadence with the graph cached between runs.
+
+### 12.8 S2.1 validation results (empirical, 2026-07-03)
+
+Ran the join validation end-to-end against a real account. **No harness code was written**
+(per §12.6, S2.1 is verify-and-record only). Environment: Cartography **0.138.1**
+(Apache-2.0, isolated venv) → **Neo4j 5.26.28 Community** (local Docker, bound to
+`127.0.0.1` only) syncing account `278059980943`, `us-east-1`, under the existing
+`aisec-vulntriage-readonly` role; joined against a fresh Prowler v5 `json-ocsf` scan of
+`ec2,s3,iam,rds,awslambda` (730 records, 189 FAIL / 541 PASS).
+
+**Result 1 — IAM (validates §12.2).** The Cartography default AWS sync produced exactly
+**one** authorization failure across the whole run:
+`inspector2:ListMembers … not authorized … Skipping…` — i.e. the *single optional module*
+§12.2 predicted, which Cartography degrades past gracefully. Every core sync (ec2, s3, iam,
+rds, lambda, kms, cloudwatch, …) completed with **zero `AccessDenied`**. The other skips in
+the log were non-authorization (CloudTrail needs a `--lookback` flag; GuardDuty/Cognito had
+no resources present; `permission_relationships` needs an opt-in mapping file). **Conclusion:
+the existing read-only role suffices for Cartography's default AWS sync — no new IAM, no
+mutation. Keep `inspector2` off by default; document `AmazonInspector2ReadOnlyAccess` as the
+opt-in for users who enable that module.** Layer 1 extends to stage 2 for free, as designed.
+
+**Result 2 — join hit-rate (resolves §12.7).** Of 182 unique Prowler resources, **6 were
+account-level pseudo-ARNs** (`…:account`, `…:root`, `…:mfa`, `…:password-policy`) that map
+to no discrete resource node by design — these are account-scope findings, handled at
+account level, never resource-joined. Of the **176 real resources**:
+
+| join strategy | hit | rate |
+|---|---|---|
+| ARN primary (`finding.resource == node.arn`) | 155 | **88.1 %** |
+| + per-type id fallback (ARN tail → `node.id`) | 170 | **96.6 %** |
+
+**Result 3 — per-type join table (the deliverable §12.4 asked for).**
+
+| Prowler `resource.type` | Cartography label | join key | strategy | hit |
+|---|---|---|---|---|
+| `AwsIamRole` / `AwsIamUser` / `AwsIamGroup` / `AwsIamPolicy` | `AWSRole` / `AWSUser` / `AWSGroup` / `AWSPolicy` | **`arn`** | primary ARN | 97–100 % |
+| `AwsS3Bucket` | `S3Bucket` | **`arn`** (`arn:aws:s3:::name`, exact match) | primary ARN | 100 % |
+| `AwsEc2Volume` | `EBSVolume` | **`arn`** | primary ARN | 100 % |
+| `AwsEc2NetworkAcl` | `EC2NetworkAcl` | **`arn`** | primary ARN | 100 % |
+| `AwsEc2Instance` | `EC2Instance` | **`id`** — *no `arn` property* | fallback: ARN tail `i-…` → `node.id` | 100 % |
+| `AwsEc2SecurityGroup` | `EC2SecurityGroup` | **`id`** — *no `arn` property* | fallback: ARN tail `sg-…` → `node.id` | 100 % |
+| `AwsEc2Eip` | *(not synced by Cartography)* | — | no node → keep v1 keyword flag | 0 % |
+| account-level (`…:root`/`…:mfa`/`…:password-policy`/`…:account`) | `AWSAccount` | — | account-scope, not resource-joined | n/a |
+
+**Key finding for the implementer (S2.2/S2.3):** the per-type fallback §12.4 anticipated is
+**mandatory** — Cartography stores EC2 instances and security groups keyed on `id` with **no
+`arn` property**, so an ARN-only join silently drops every EC2 resource. The fallback is
+simple and total: take the last path component of the Prowler ARN (`…/i-abc` → `i-abc`,
+`…/sg-abc` → `sg-abc`) and match `node.id`. IAM and S3, by contrast, join cleanly on `arn`.
+With both, real-resource coverage is ~97 %; the residue (EIPs, unattached AWS-managed
+policies) is exactly the graceful-degrade set — those findings keep v1's keyword
+`internet_exposed` and gain no graph facts.
+
+**Also confirmed:** the Neo4j **HTTP Cypher API** (`/db/neo4j/tx/commit`, basic-auth) is
+reachable and returns the node ARNs/ids with a **pure-stdlib `urllib`** client — validating
+the §12.3 approach (no `neo4j` bolt driver needed in `collect.py`).
+
+> Reproduction note: the validation used throwaway artifacts (a local Neo4j container, a
+> scratch Prowler scan, an ad-hoc `urllib` query script) — none committed, consistent with
+> "no code shipped." S2.2 is where the HTTP Cypher helper and the join logic above land in
+> `collect.py`.
+
+### 12.9 S2.2 implementation notes (2026-07-03)
+
+Shipped in `collect.py` (stdlib only, read-only, B2-preserving):
+
+- **`neo4j_cypher(endpoint, user, password, statement, params, database)`** — one Cypher
+  statement over Neo4j's HTTP transactional endpoint (`POST /db/<db>/tx/commit`), basic-auth
+  header, JSON body, rows returned as dicts. Same bounded-retry/backoff as the intel feeds;
+  raises `Neo4jError` on a Cypher error, `401/403`, or exhausted retries. Deliberately **not**
+  the `neo4j` bolt driver — keeps the harness stdlib-only (validates §12.3).
+- **`graph_key(uid)`** — the S2.1 join: ARN primary, with the last-path-component id fallback
+  (`…/i-abc` → `i-abc`) that EC2 needs.
+- **`graph_facts(graph_cfg, password, findings)`** — bulk-resolves findings to nodes and
+  returns `{finding_id: {joined, join_by, node_labels, exposure_path, blast_radius}}`.
+- **`graph-check` command** — read-only; prints the facts per finding. Exercises the above
+  without touching the ledger/triage. `[graph]` config (default **off**) + secret
+  `VULNTRIAGE_NEO4J_PASSWORD` (env, never `.env`) added.
+
+**The Cypher, written against the real graph schema (verified, not assumed):**
+
+- **EC2 exposure** — Cartography does **not** set an `exposed_internet` boolean in this
+  version, so exposure is computed: an `EC2Instance` is exposed if it has a
+  `publicipaddress` **or** is a member of an internet-open security group. Open-ingress is
+  `(:IpRange {id:'0.0.0.0/0'})-[:MEMBER_OF_IP_RULE]->(:IpPermissionInbound)-[:MEMBER_OF_EC2_SECURITY_GROUP]->(sg)`
+  — note the inbound rule attaches to the SG via `MEMBER_OF_EC2_SECURITY_GROUP` (not
+  `MEMBER_OF_IP_RULE`), and the `IpPermissionInbound` label is what distinguishes an inbound
+  rule from the egress rules that also point at `0.0.0.0/0`.
+- **S3 exposure** — read off the `S3Bucket` node: `anonymous_access`, and an incomplete
+  public-access block (`block_public_acls`/`restrict_public_buckets` not both true).
+- **Blast radius (IAM principal)** — `(:AWSRole|:AWSUser {arn})-[:POLICY]->(:AWSPolicy)-[:STATEMENT]->(:AWSPolicyStatement {effect:'Allow'})`,
+  counting statements whose `action` contains `*` (`admin_like`) or a `service:*` wildcard.
+
+**Verified results (live graph, `graph-check` over the 153-finding S1.5-style scan):**
+143/153 findings joined (10 unjoined = the account-level pseudo-ARNs, as in §12.8);
+**exposure_path=true for 9** (7 EC2 instances with public IPs, 2 security groups open to
+`0.0.0.0/0` on SSH); **admin-like blast for 19** (e.g. the `full_access` role and the
+`AdministratorAccess` SSO role, matched by `Action:*`). Graceful degrade confirmed: an
+unreachable endpoint retries then raises, a bad password fails fast — both fall back to the
+v1 keyword flag (§12.4), never crash the run.
+
+**Empirical limitation for the S2.3 implementer (like S2.1's EC2-no-arn finding):**
+blast-radius is a **wildcard-privilege proxy**, not true reachability. Cartography without the
+opt-in `--permission-relationships-file` writes no `CAN_ACCESS` edges to specific resources,
+and in this sync **EC2 instances carry no instance-profile→role edge**, so a compute
+resource can't be walked to its privileges. Deepening blast-radius means enabling the
+permission-relationships mapping (which needs **no extra IAM** — it is computed from
+already-synced policy data) and, for compute, the instance-profile edge. `admin_like` is the
+honest v1 signal; record the depth ceiling rather than overclaim a path.
