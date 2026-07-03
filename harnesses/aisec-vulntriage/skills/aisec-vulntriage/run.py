@@ -76,6 +76,7 @@ RATIONALE_MAX_CHARS = 200  # the posted rationale summary is a short digest line
 PRIORITIES = ("Critical", "High", "Medium", "Low")
 _RANK = {"Low": 0, "Medium": 1, "High": 2, "Critical": 3}  # higher = more urgent
 _LABEL = {v: k for k, v in _RANK.items()}                  # rank -> label
+_PRI_EMOJI = {"Critical": "🔴", "High": "🟠", "Medium": "🟡", "Low": "⚪"}
 ASSET_CRITICALITY = ("high", "medium", "low", "unknown")
 
 # Markers the agent must wrap its JSON in, extracted deterministically from any
@@ -291,6 +292,99 @@ def format_post(item, priority, rationale):
             f"🔗 {src}")
 
 
+def post_footer(channel_id, log):
+    """One trailing message: attribution + the current evidence-log head, so a reader
+    can cross-check the signed audit record. Posted only when something else posted."""
+    seq, head = log.head()
+    post_message(channel_id, f"{ACK}\n🧾 Evidence log head: {head[:16]}… "
+                             f"({seq + 1} entr{'y' if seq == 0 else 'ies'})")
+
+
+def post_per_finding(channel_id, records, log):
+    """Legacy verbose path (output.digest=false): one Discord message per finding.
+    Returns the list of finding_ids whose post succeeded (post-then-mark)."""
+    posted = []
+    if records:
+        progress(f"[..] posting {len(records)} verdict(s) individually…")
+    for fid, item, priority, rationale in records:
+        if post_message(channel_id, format_post(item, priority, rationale)):
+            posted.append(fid)
+            progress(f"[..] posted {len(posted)} [{priority}]: {item['check_id']}")
+        else:
+            progress(f"[warn] post failed for {fid}; leaving unmarked for retry.")
+    if posted:
+        post_footer(channel_id, log)
+    return posted
+
+
+def post_digest(channel_id, records, output_cfg, log):
+    """Post a bounded digest: a header (counts by priority) + the top-N most-urgent
+    detail-eligible findings, ONE finding per Discord message. One-per-message is
+    deliberate — OpenClaw's Discord send path re-chunks a long message and would split
+    a packed multi-finding message mid-rationale; a single finding block is small and
+    is never split. Volume is capped at ~N+2 messages regardless of finding count.
+
+    Everything not shown individually (findings below the cap, plus non-detail
+    priorities) is represented by the header — still triaged, signed into the evidence
+    log, and marked seen; review those via the evidence log or Prowler directly.
+
+    Post-then-mark is preserved: a finding is returned (markable) only if the message
+    that REPRESENTS it posted OK — the header for header-represented findings, its own
+    message for shown ones. A failed message leaves those findings unmarked to retry.
+    """
+    detail_set = {p for p in output_cfg.get("detail_priorities", ["Critical", "High"])
+                  if p in _RANK}
+    try:
+        top_n = max(0, int(output_cfg.get("detail_top_n", 12)))
+    except (TypeError, ValueError):
+        top_n = 12
+    # Most-urgent first → the cap keeps the highest-priority findings.
+    records = sorted(records, key=lambda r: _RANK.get(r[2], 0), reverse=True)
+    counts = {p: 0 for p in PRIORITIES}
+    for _, _, priority, _ in records:
+        counts[priority] = counts.get(priority, 0) + 1
+
+    detailed = [r for r in records if r[2] in detail_set]
+    shown = detailed[:top_n]
+    overflow = len(detailed) - len(shown)
+    shown_ids = {r[0] for r in shown}
+    # Everything not shown individually is represented by the header message.
+    header_reps = [fid for fid, _, _, _ in records if fid not in shown_ids]
+
+    counts_line = "  ".join(f"{_PRI_EMOJI[p]} {p}: {counts.get(p, 0)}" for p in PRIORITIES)
+    lines = [f"🛡️ **aisec-vulntriage — 新規 findings: {len(records)}**", counts_line]
+    if shown:
+        tail = f"（詳細対象 {len(detailed)} 件中）" if overflow > 0 else ""
+        lines.append(f"↓ 優先度上位 {len(shown)} 件を個別表示{tail}")
+    else:
+        lines.append("（個別表示対象なし — 件数のみ）")
+    if overflow > 0:
+        lines.append(f"…ほか {overflow} 件は evidence log / Prowler を参照")
+    header = "\n".join(lines)
+
+    posted = []
+    if post_message(channel_id, header):
+        posted.extend(header_reps)
+        progress(f"[..] posted digest header ({len(records)} finding(s); "
+                 f"{len(header_reps)} represented by header)")
+    else:
+        progress("[warn] digest header failed; leaving header-represented findings "
+                 "unmarked for retry.")
+
+    # One message per shown finding — each block is small, so OpenClaw never splits it.
+    for fid, item, priority, rationale in shown:
+        if post_message(channel_id, format_post(item, priority, rationale)):
+            posted.append(fid)
+            progress(f"[..] posted [{priority}] {item['check_id']} "
+                     f"({sum(1 for p in posted if p in shown_ids)}/{len(shown)})")
+        else:
+            progress(f"[warn] post failed for {fid}; leaving unmarked for retry.")
+
+    if posted:
+        post_footer(channel_id, log)
+    return posted
+
+
 def main():
     cfg = load_config()
     channel_id = (os.environ.get("VULNTRIAGE_CHANNEL_ID") or "").strip()
@@ -331,12 +425,14 @@ def main():
         dropped.extend(drp)
         progress(f"[..] chunk {n}/{len(chunks)}: {len(ver)} triaged, {len(drp)} dropped")
 
-    # Sign each verdict into the evidence log, then post. Evidence is appended BEFORE
-    # the post so the audit record exists even if Discord delivery later fails.
+    # Floor each verdict's priority and sign it into the evidence log FIRST — the audit
+    # record (for every triaged finding, detailed or count-only) must exist even if
+    # Discord delivery later fails. Posting is a separate step so digest/per-finding
+    # modes share one authoritative set of records.
     log = evidence.EvidenceLog(EVIDENCE_LOG)
-    posted, handled = [], set()
+    records, handled = [], set()
     if verdicts:
-        progress(f"[..] recording + posting up to {len(verdicts)} verdict(s)…")
+        progress(f"[..] recording {len(verdicts)} verdict(s) into evidence log…")
     for v in verdicts:
         fid = v.get("finding_id")
         item = by_id.get(fid)
@@ -362,17 +458,14 @@ def main():
             "rationale": rationale,
             "agent_id": AGENT_ID,
         })
+        records.append((fid, item, priority, rationale))
 
-        if post_message(channel_id, format_post(item, priority, rationale)):
-            posted.append(fid)
-            progress(f"[..] posted {len(posted)} [{priority}]: {item['check_id']}")
-        else:
-            progress(f"[warn] post failed for {fid}; leaving unmarked for retry.")
-
-    if posted:
-        seq, head = log.head()
-        post_message(channel_id, f"{ACK}\n🧾 Evidence log head: {head[:16]}… "
-                                 f"({seq + 1} entr{'y' if seq == 0 else 'ies'})")
+    # Post: digest (compact, avoids a per-finding flood) unless disabled.
+    output_cfg = cfg.get("output", {})
+    if bool(output_cfg.get("digest", True)):
+        posted = post_digest(channel_id, records, output_cfg, log)
+    else:
+        posted = post_per_finding(channel_id, records, log)
 
     # Post-then-mark: mark successfully-posted verdicts + agent-dropped findings.
     # Left UNMARKED (retry next run): posted-but-failed, and every finding in a

@@ -34,7 +34,7 @@ version = "5."
 
 # Scope of checks. Empty lists mean Prowler defaults. Narrower scope = faster runs
 # and less noise for the triage LLM to sort. See `prowler aws --list-services`.
-services = ["ec2", "s3", "iam", "rds", "lambda"]   # AWS services to scan
+services = ["ec2", "s3", "iam", "rds", "awslambda"]   # AWS services to scan (Prowler names; Lambda is "awslambda")
 compliance = []                                     # e.g. ["cis_3.0_aws"]; empty = all checks
 
 # Which finding statuses to collect from Prowler's output. FAIL is what needs
@@ -75,3 +75,28 @@ language = "ja"
 # keep each prompt focused and isolate failures (a bad chunk retries next run
 # without sinking the whole run).
 llm_batch_size = 8
+
+# Digest mode — fold findings into a compact digest instead of one Discord message
+# per finding. A full multi-service scan can surface 100+ findings; posting each one
+# individually floods the channel. With digest=true a run posts a header (counts by
+# priority) + a detail block for the high-signal priorities, and represents the rest
+# by count only. Set false to post one message per finding (verbose, legacy behavior).
+digest = true
+
+# Which priorities are ELIGIBLE for an individual detail message in the digest.
+# Findings at any OTHER priority are represented only by their count in the header
+# (still triaged, signed into the evidence log, and marked seen). Critical/High are
+# act-now; Medium/Low are usually reviewed in bulk via Prowler directly. This is the
+# POST-floor priority, so an internet-exposed / KEV finding floored up to High is
+# eligible. Ordering within the digest is most-urgent first.
+detail_priorities = ["Critical", "High"]
+
+# Hard cap on how many findings get their OWN Discord message (one finding per
+# message — packing multiple findings per message is unsafe because OpenClaw's Discord
+# send path re-chunks long messages and can split one mid-rationale). The top N most-
+# urgent detail-eligible findings are posted individually; any beyond N are summarized
+# by a "…and M more" line and represented by the header count. This bounds Discord
+# volume to ~N+2 messages no matter how many findings a scan surfaces. The overflow
+# findings are still triaged, signed into the evidence log, and marked seen — review
+# them via the evidence log or Prowler directly.
+detail_top_n = 12
