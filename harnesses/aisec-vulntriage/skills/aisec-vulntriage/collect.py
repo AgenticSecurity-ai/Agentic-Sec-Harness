@@ -391,6 +391,9 @@ def normalize(rec):
         "kev": {},
         "epss": {},
         "nvd": {},
+        # Cartography graph facts filled in by graph_enrich() when [graph].enabled
+        # (stage 2.3). Empty {} means the graph was not consulted (v1 default / degrade).
+        "graph": {},
     }
 
 
@@ -509,6 +512,11 @@ def enrich(items, cfg):
 # exercises it. Wiring into the floor/rationale/schema is stage 2.3.           #
 # --------------------------------------------------------------------------- #
 OPEN_CIDR = "0.0.0.0/0"
+# Node labels for which graph_facts() actually computes an exposure path. For a joined
+# node of any OTHER type (an IAM principal, an RDS instance, …) the graph has no exposure
+# opinion, so exposure_path.exposed stays None and the finding keeps the v1 keyword flag
+# rather than being wrongly cleared to False.
+EXPOSURE_MODELED_LABELS = {"EC2Instance", "EC2SecurityGroup", "S3Bucket"}
 
 
 def graph_key(resource_uid):
@@ -615,7 +623,10 @@ def graph_facts(graph_cfg, password, findings):
                 reasons.append("s3_public_access_block_incomplete")
         if facts["joined"]:
             facts["exposure_path"]["reasons"] = reasons
-            facts["exposure_path"]["exposed"] = bool(reasons)
+            # Definite True/False only for the node types we model exposure for; None
+            # ("no graph opinion") for everything else, so the caller keeps the keyword flag.
+            modeled = any(l in EXPOSURE_MODELED_LABELS for l in facts["node_labels"])
+            facts["exposure_path"]["exposed"] = bool(reasons) if modeled else None
 
         if arn in blast:
             row = blast[arn]
@@ -627,6 +638,55 @@ def graph_facts(graph_cfg, password, findings):
             }
         out[f["id"]] = facts
     return out
+
+
+def graph_enrich(items, cfg):
+    """Stage 2.3: when [graph].enabled, attach Cartography graph facts to each finding
+    and let the graph-derived exposure_path OVERRIDE the v1 keyword `internet_exposed`
+    flag for the node types the graph models (EC2 instance / security group / S3 bucket).
+    A joined node of any other type, an unjoined resource, a missing password, a disabled
+    toggle, or an unreachable graph all degrade to the keyword flag — a graph outage never
+    blocks or crashes a run (DESIGN §12.4).
+
+    Graph facts are collector-authoritative, exactly like KEV/EPSS: the tool-less triage
+    LLM never sets them and the deterministic priority floor (run.py) reads them, so a
+    compromised LLM cannot talk a graph-confirmed toxic combination down."""
+    gcfg = cfg.get("graph", {})
+    if not gcfg.get("enabled", False):
+        return items
+    password = os.environ.get("VULNTRIAGE_NEO4J_PASSWORD", "")
+    if not password:
+        _log("[graph] [graph].enabled but VULNTRIAGE_NEO4J_PASSWORD is unset; "
+             "degrading to the keyword exposure flag (DESIGN §12.4)")
+        return items
+    try:
+        facts = graph_facts(gcfg, password, items)
+    except Neo4jError as e:
+        _log(f"[graph] graph unavailable ({e}); degrading to the keyword exposure flag")
+        return items
+
+    joined = overridden = exposed = admin = 0
+    for it in items:
+        gf = facts.get(it["id"])
+        if not gf:
+            continue
+        it["graph"] = gf
+        if not gf["joined"]:
+            continue
+        joined += 1
+        exp = gf["exposure_path"]["exposed"]
+        if exp is not None:  # graph modeled this node type -> it is authoritative
+            if bool(exp) != bool(it["internet_exposed"]):
+                overridden += 1
+            it["internet_exposed"] = bool(exp)
+            if exp:
+                exposed += 1
+        br = gf.get("blast_radius")
+        if br and br.get("admin_like"):
+            admin += 1
+    _log(f"[graph] {joined}/{len(items)} finding(s) joined; exposure override on "
+         f"{overridden} (graph exposed={exposed}); admin-like blast on {admin}")
+    return items
 
 
 # --------------------------------------------------------------------------- #
@@ -687,6 +747,10 @@ def cmd_collect(cfg, seen_path, prowler_bin, aws_profile, prowler_output,
              f"({len(fresh)} new, {len(emit) - len(fresh)} already-seen) for full re-digest")
 
     emit = enrich(emit, cfg)
+    # Graph context (stage 2.3): overrides the keyword exposure flag with a graph-derived
+    # exposure_path and attaches blast_radius, when [graph].enabled. No-op / graceful
+    # degrade otherwise, so the sort + downstream floor keep working on the keyword flag.
+    emit = graph_enrich(emit, cfg)
 
     # Sort so the most urgent surface first: KEV-listed, then higher EPSS, then
     # internet-exposed, then Prowler severity. (Deterministic ordering only — the

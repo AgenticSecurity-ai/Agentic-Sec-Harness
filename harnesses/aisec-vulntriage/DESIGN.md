@@ -338,9 +338,11 @@ the cross-harness session log; this checklist is the vulntriage-specific roadmap
    - ✅ **S2.2 Neo4j HTTP query helper** — `collect.py` `neo4j_cypher()` (stdlib urllib +
      basic-auth), `graph_facts()` exposure/blast-radius Cypher, `graph-check` command.
      Verified on the live graph; details + limits in **§12.9**.
-   - ⏳ **S2.3 Wire graph facts** — into the finding schema, §5 rationale, and priority
-     floor; graph `exposure_path` replaces the keyword `internet_exposed` (keyword kept as
-     the degrade path).
+   - ✅ **S2.3 Wire graph facts** — `graph_enrich()` in `collect.py` overrides the keyword
+     `internet_exposed` with graph `exposure_path` (keyword kept as the degrade path); `run.py`
+     `build_rationale` records graph provenance + grounds `excess_privilege` with blast-radius,
+     and `floor_priority` floors a graph-confirmed toxic combination to Critical. Details in
+     **§12.10**.
    - ⏳ **S2.4 Config/docs** — graph toggle (default off), `.env`/host wiring
      (`CARTOGRAPHY_BIN`, Neo4j endpoint + credentials), README/SKILL updates.
 3. ⏳ **+ More collectors & audit-grade evidence** — Trivy (ECR image CVEs; then
@@ -653,3 +655,73 @@ resource can't be walked to its privileges. Deepening blast-radius means enablin
 permission-relationships mapping (which needs **no extra IAM** — it is computed from
 already-synced policy data) and, for compute, the instance-profile edge. `admin_like` is the
 honest v1 signal; record the depth ceiling rather than overclaim a path.
+
+### 12.10 S2.3 wiring — graph facts into triage (2026-07-04)
+
+Wires the S2.2 graph facts into the collector schema, the priority floor, and the signed
+rationale. Behavior is gated on `[graph].enabled` (default off), so v1 users are unaffected
+and every failure mode degrades to the keyword flag.
+
+**collect.py** — `graph_enrich(items, cfg)` runs right after `enrich()` in `cmd_collect`:
+when `[graph].enabled` and `VULNTRIAGE_NEO4J_PASSWORD` is set, it calls `graph_facts()`,
+attaches the facts to each finding's new `graph` field (schema default `{}`), and lets the
+graph-derived `exposure_path.exposed` **override** the keyword `internet_exposed` — but only
+for the node types the graph actually models. `graph_facts()` now sets `exposed` to a
+definite `True`/`False` only for `EC2Instance` / `EC2SecurityGroup` / `S3Bucket`
+(`EXPOSURE_MODELED_LABELS`) and `None` for any other joined type, so a joined IAM/RDS node
+whose exposure the graph doesn't compute **keeps the keyword flag** instead of being wrongly
+cleared to `False`. Disabled toggle, missing password, unreachable graph (bounded retry then
+`Neo4jError`), and unjoined resources all degrade to the keyword flag — verified through the
+real `collect` path (exit 0 in every case; never crashes a run).
+
+**run.py** — three deterministic (collector-authoritative) hooks read `item["graph"]`:
+- `graph_over_privileged(item)` — `True` when the joined IAM principal's blast-radius has a
+  `*` action or a `service:*` statement, `False` for a joined principal without one, `None`
+  when the graph has no opinion. The honest wildcard proxy, not reachability (§12.9).
+- `build_rationale` — the graph blast-radius **grounds** `excess_privilege`: it can force it
+  `True` (collector fact) but never `False` (the proxy is incomplete, so the LLM may still see
+  over-privilege it misses). Records a `graph` provenance sub-object (`join_by`, `exposure`,
+  `exposure_reasons`, `blast_radius`) in the signed evidence when the resource joined.
+- `floor_priority` — a graph-confirmed **toxic combination** (`exposure ∧ over_privileged ∧
+  (KEV ∨ high-EPSS)`) floors priority to **Critical**. The floor is wired and unit-tested.
+
+**Honest limitation:** the toxic-combination floor rarely fires *per finding* today, because
+`graph_facts()` computes exposure on EC2/SG/S3 nodes and over-privilege on IAM principals
+*separately* and does not yet **walk** from an exposed compute node to its role. The two *real*
+wins that fire today are (1) graph exposure replacing the keyword guess (removing false
+positives and confirming true positives for EC2/SG/S3) and (2) blast-radius grounding
+`excess_privilege` for IAM findings. The Critical floor activates once `graph_facts()` walks
+the EC2→role bridge (see the split-analysis below — this is a Cypher change on our side, **not**
+a Cartography capability gap).
+
+**Split analysis — is the missing EC2→role bridge a Cartography limit? No (schema-confirmed,
+2026-07-04).** Cartography's current AWS schema explicitly models the compute→role path:
+`(EC2Instance)-[:INSTANCE_PROFILE]->(AWSInstanceProfile)-[:ASSOCIATED_WITH]->(AWSRole)` **and**
+a direct `(EC2Instance)-[:STS_ASSUMEROLE_ALLOW]->(AWSRole)` (feature request lyft/cartography
+issue #304 → PR #646, merged). `AWSInstanceProfile` is a first-class node type. Crucially there
+is **no analysis-job JSON** for this mapping (the only EC2 analysis job is
+`aws_ec2_asset_exposure.json`), so these edges are built during **normal sync** — they need
+neither an opt-in analysis step nor the `permission_relationships` mapping. So the edge's absence
+in the S2.1/S2.2 live graph is a **data/config artifact, not a capability gap** — most likely the
+test account's EC2 instances simply had no instance profile attached, so there was nothing to
+map. `permission_relationships` (opt-in, for fine-grained `CAN_ACCESS` edges) would *deepen*
+blast-radius but is **not** required for this floor: walking EC2→instance-profile→role and reusing
+the role's existing wildcard-statement `admin_like` proxy is enough.
+
+**Pending live confirmation (targeted, one query when Neo4j is back):**
+`MATCH (p:AWSInstanceProfile) RETURN count(p)` and
+`MATCH (i:EC2Instance)-[:INSTANCE_PROFILE]->(:AWSInstanceProfile)-[:ASSOCIATED_WITH]->(:AWSRole) RETURN count(*)`.
+count(profiles)>0 with 0 bridges ⇒ test EC2s had no profile attached (data); count(profiles)=0 ⇒
+the IAM instance-profile sync module didn't run (config). Either way it is **not** a Cartography
+capability limit. Follow-up once confirmed: extend `graph_facts()` to walk the bridge so an
+exposed EC2 inherits its role's `blast_radius`, lighting up the toxic-combination floor per finding.
+
+**Verification:** unit-tested offline (`graph_over_privileged`, `floor_priority` including the
+toxic path and the not-lowered guarantee, `build_rationale` grounding + provenance, and
+`graph_enrich` override + all degrade paths with a stubbed `graph_facts`); the real `collect`
+path exercised with a synthetic OCSF fixture for graph-off (no regression), graph-on/no-password,
+and graph-on/unreachable. **A live end-to-end run against a populated Cartography graph is still
+pending** — it needs the Neo4j container + Cartography venv from S2.1/S2.2, which were not
+present in this session's environment. S2.2's live Cypher (join 143 / exposure 9 / admin-like 19)
+is unchanged by S2.3 except the `exposed=None`-for-unmodeled refinement (which only relabels
+previously-`False` joined non-EC2/SG/S3 nodes).

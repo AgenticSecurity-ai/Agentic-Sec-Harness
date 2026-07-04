@@ -120,7 +120,9 @@ full_digest_weekday = "mon"
 # Stage 2 graph context (Cartography + Neo4j) — see DESIGN.md §12. OFF by default:
 # v1 users are unaffected and the harness keeps using the keyword exposure flag. When
 # enabled, the collector reads deterministic exposure_path / blast_radius facts from a
-# Cartography-populated Neo4j and (stage 2.3) uses them to ground the priority floor.
+# Cartography-populated Neo4j: the graph-derived exposure_path overrides the keyword
+# internet_exposed flag, blast_radius grounds excess_privilege, and a graph-confirmed
+# toxic combination (exposure + over-privilege + KEV/high-EPSS) floors priority to Critical.
 # Still READ-ONLY and B2-preserving: Cartography (an external CLI, like Prowler) builds
 # the graph from the SAME read-only role; the collector only QUERIES it over Neo4j's
 # HTTP Cypher endpoint with stdlib urllib (no bolt driver). The Neo4j password is a
