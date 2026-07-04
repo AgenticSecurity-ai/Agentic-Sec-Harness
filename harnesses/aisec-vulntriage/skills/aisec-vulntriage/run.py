@@ -157,6 +157,18 @@ def finding_epss(item):
     return max(scores) if scores else 0.0
 
 
+def graph_over_privileged(item):
+    """Graph-derived over-privilege for the finding's IAM principal (collector fact),
+    or None when the graph has no blast-radius opinion (the resource is not a joined IAM
+    principal, or [graph] is off / unavailable). A wildcard action (`*`) or a `service:*`
+    statement on the principal is the honest v1 proxy for over-privilege — NOT true
+    reachability, which needs the opt-in permission-relationship edges (DESIGN §12.9)."""
+    br = (item.get("graph") or {}).get("blast_radius")
+    if not br:
+        return None
+    return bool(br.get("admin_like") or (br.get("wildcard_service_stmts") or 0) > 0)
+
+
 def floor_priority(priority, item, triage_cfg):
     """Raise the LLM's priority to a deterministic floor when KEV / high EPSS /
     internet exposure make a finding unarguably urgent. Recall on High matters more
@@ -169,15 +181,31 @@ def floor_priority(priority, item, triage_cfg):
         if label in _RANK:
             rank = max(rank, _RANK[label])
 
-    if finding_kev(item):
-        raise_to(triage_cfg.get("kev_forces_at_least", "High"))
+    kev = finding_kev(item)
     try:
-        if finding_epss(item) >= float(triage_cfg.get("epss_high_threshold", 0.5)):
-            raise_to("High")
+        epss_high = finding_epss(item) >= float(triage_cfg.get("epss_high_threshold", 0.5))
     except (TypeError, ValueError):
-        pass
-    if item.get("internet_exposed"):
+        epss_high = False
+    # internet_exposed is graph-derived when [graph] is on (collect.py overrode it for
+    # EC2/SG/S3), else the v1 keyword flag — either way a collector fact here.
+    exposed = bool(item.get("internet_exposed"))
+
+    if kev:
+        raise_to(triage_cfg.get("kev_forces_at_least", "High"))
+    if epss_high:
+        raise_to("High")
+    if exposed:
         raise_to(triage_cfg.get("exposure_forces_at_least", "High"))
+    # Stage 2 (DESIGN §12.1): a graph-confirmed toxic combination — internet exposure AND
+    # an over-privileged IAM principal AND a KEV-listed / high-EPSS CVE — is the strongest
+    # deterministic signal we have; floor it to Critical. Collector facts only, so a
+    # compromised LLM cannot talk it down. NB: today this rarely fires PER FINDING because
+    # collect.py's graph_facts() computes exposure (EC2/SG/S3) and over-privilege (IAM
+    # principal) separately and does not yet WALK the EC2→instance-profile→role bridge.
+    # That bridge IS provided by Cartography's normal sync (schema-confirmed, DESIGN §12.10),
+    # so lighting this up is a Cypher change on our side — not a tool limit. Floor is wired.
+    if exposed and graph_over_privileged(item) and (kev or epss_high):
+        raise_to("Critical")
     return _LABEL[rank]
 
 
@@ -199,6 +227,9 @@ def build_prompt(items, language):
         "cve_ids": it["cve_ids"],
         "kev_listed": finding_kev(it),
         "max_epss": round(finding_epss(it), 5),
+        # Graph-derived over-privilege (collector fact, null when the graph has no
+        # opinion) — grounds the excess_privilege judgment below (DESIGN §12.1).
+        "over_privileged": graph_over_privileged(it),
     } for it in items]
     return f"""You are a security triage step in an automated pipeline. You have NO tools.
 Do not attempt to scan, fetch, post, or run anything — only return text.
@@ -283,19 +314,34 @@ def clip(text, limit=RATIONALE_MAX_CHARS):
 def build_rationale(item, verdict, priority):
     """Compose the DESIGN §5 rationale object: deterministic collector facts
     (kev_listed / epss / internet_exposed) MERGED with the LLM's judgments
-    (excess_privilege / asset_criticality / summary). The deterministic three are
+    (excess_privilege / asset_criticality / summary). The deterministic facts are
     authoritative and never taken from the LLM."""
     crit = str(verdict.get("asset_criticality", "unknown")).lower()
     if crit not in ASSET_CRITICALITY:
         crit = "unknown"
-    return {
+    # excess_privilege: the graph blast-radius is a collector FACT that can force it True
+    # (DESIGN §12.1 — it grounds excess_privilege), but never forces it False: the wildcard
+    # proxy is incomplete (§12.9), so the LLM may still see over-privilege the graph misses.
+    excess = bool(verdict.get("excess_privilege", False)) or bool(graph_over_privileged(item))
+    rationale = {
         "kev_listed": finding_kev(item),
         "epss": round(finding_epss(item), 5),
         "internet_exposed": bool(item.get("internet_exposed")),
-        "excess_privilege": bool(verdict.get("excess_privilege", False)),
+        "excess_privilege": excess,
         "asset_criticality": crit,
         "summary": clip(verdict.get("summary", "")),
     }
+    # Record graph provenance when the resource joined the Cartography graph, so the signed
+    # evidence log shows WHY exposure / excess_privilege were set deterministically.
+    g = item.get("graph") or {}
+    if g.get("joined"):
+        rationale["graph"] = {
+            "join_by": g.get("join_by"),
+            "exposure": g.get("exposure_path", {}).get("exposed"),
+            "exposure_reasons": g.get("exposure_path", {}).get("reasons", []),
+            "blast_radius": g.get("blast_radius"),
+        }
+    return rationale
 
 
 def format_post(item, priority, rationale):
