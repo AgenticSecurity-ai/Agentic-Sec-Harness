@@ -199,11 +199,10 @@ def floor_priority(priority, item, triage_cfg):
     # Stage 2 (DESIGN §12.1): a graph-confirmed toxic combination — internet exposure AND
     # an over-privileged IAM principal AND a KEV-listed / high-EPSS CVE — is the strongest
     # deterministic signal we have; floor it to Critical. Collector facts only, so a
-    # compromised LLM cannot talk it down. NB: today this rarely fires PER FINDING because
-    # collect.py's graph_facts() computes exposure (EC2/SG/S3) and over-privilege (IAM
-    # principal) separately and does not yet WALK the EC2→instance-profile→role bridge.
-    # That bridge IS provided by Cartography's normal sync (schema-confirmed, DESIGN §12.10),
-    # so lighting this up is a Cypher change on our side — not a tool limit. Floor is wired.
+    # compromised LLM cannot talk it down. This fires PER FINDING for an exposed EC2 because
+    # collect.py's graph_facts() now WALKS the EC2→instance-profile→role bridge (DESIGN
+    # §12.11) so the instance inherits its role's blast radius — exposure and over-privilege
+    # meet on one finding rather than being computed on separate nodes.
     if exposed and graph_over_privileged(item) and (kev or epss_high):
         raise_to("Critical")
     return _LABEL[rank]
