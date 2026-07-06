@@ -136,6 +136,39 @@ Two more deterministic guardrails reinforce this:
 > become load-bearing. Introduced only when mutation is on the table, not before.
 > See `DESIGN.md` §8 (roadmap) and §3.4 (two-tier tool model).
 
+## Stage 2 — graph context (opt-in, off by default)
+
+When `[graph].enabled = true` in `config.toml`, the collector enriches each finding with
+deterministic **asset-graph** facts read from a **Cartography**-populated **Neo4j**, on
+top of the v1 KEV/EPSS/exposure signals. This is an add-on, not a new class of behavior —
+it strengthens the deterministic Layer-3 floor, it does not touch the B2 or read-only
+guarantees.
+
+- **Cartography + Neo4j are external tools** the operator runs, exactly like Prowler.
+  Cartography builds the graph from the **same read-only IAM role** (its default AWS sync
+  needs no IAM beyond `SecurityAudit` + `ViewOnlyAccess`). `collect.py` **only queries** an
+  already-populated Neo4j — it does not run Cartography. Queries go over Neo4j's **HTTP
+  transactional Cypher API** with stdlib `urllib` (`neo4j_cypher()`), deliberately **not**
+  the third-party `neo4j` bolt driver, so the harness stays stdlib-only.
+- **What the facts do** (`graph_facts()` → `graph_enrich()` in `collect.py`): a
+  graph-derived `exposure_path` **overrides** v1's keyword `internet_exposed` guess for
+  modeled resource types (EC2 / security-group / S3); `blast_radius` grounds the LLM's
+  `excess_privilege` in real IAM wildcard reach — including an exposed **EC2** instance
+  inheriting the blast-radius of the role it assumes, walked over the
+  `EC2Instance → AWSInstanceProfile → AWSRole` bridge; and a graph-confirmed **toxic
+  combination** (exposure ∧ over-privilege ∧ KEV/high-EPSS on one finding) floors that
+  finding's priority to **Critical**.
+- **Graceful degrade — same contract as a down intel feed.** If `[graph].enabled` is off,
+  `VULNTRIAGE_NEO4J_PASSWORD` is unset, Neo4j is unreachable, or a finding doesn't join a
+  node, that finding falls back to the keyword exposure flag and simply gains no graph
+  facts. The run never crashes and never blocks on the graph.
+- **Secrets / config split.** The Neo4j endpoint / user / database are non-secret and live
+  in `config.toml` `[graph]`. The Neo4j **password is a secret** read from the environment
+  (`VULNTRIAGE_NEO4J_PASSWORD`), never `.env` or the repo. Bind Neo4j to localhost only —
+  the graph is a sensitive topology map. Validate read-only with
+  `collect.py graph-check`. Operator setup runbook: README
+  "Appendix — enabling Stage 2 graph context"; design + validation: `DESIGN.md` §12.
+
 ## Data feeds / terms
 
 CVE enrichment uses free public feeds via their public APIs — **CISA KEV** (catalog

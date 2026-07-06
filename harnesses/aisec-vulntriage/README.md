@@ -273,6 +273,7 @@ id with `openclaw cron list` (the `ID` column), then:
 | **Change the schedule** (time, interval) | `openclaw cron edit <job-id>` |
 | **Run without cron at all** | `python3 skills/aisec-vulntriage/run.py` |
 | **Dry run** (read-only, no posting) | `python3 skills/aisec-vulntriage/collect.py collect --prowler-output <file>` |
+| **Check the graph facts** (Stage 2, read-only) | `python3 skills/aisec-vulntriage/collect.py graph-check` |
 | **Verify the audit trail** | `python3 skills/aisec-vulntriage/evidence.py verify state/evidence.log` |
 
 > **Note for laptop / WSL2 hosts:** a scheduled run only fires while the host is
@@ -352,11 +353,17 @@ accepted v1 limitation; see `DESIGN.md` §5 notes.)
 ## Scope & roadmap (v1 = read-only walking skeleton)
 
 v1 is Phase 1–3 + 7: **collect → enrich → triage → report/evidence**, read-only.
-Deliberately deferred (documented, not built): Cartography(+Neo4j) asset-graph
-"toxic-combination" context, Trivy image/snapshot CVEs, DefectDojo system of record,
-Sigstore Rekor transparency, and — the hard line — **Phase 4–6 execution** (decide →
-apply → verify), which is where the architecture escalates beyond tool-less B2 to
-gated agentic tool-calling. Full design, rationale, and roadmap: **`DESIGN.md`**.
+**Stage 2 graph context (Cartography + Neo4j) is now available as an opt-in add-on** —
+it turns v1's keyword exposure *guess* into a graph-derived *fact*, grounds
+excess-privilege in real IAM blast-radius, and floors a graph-confirmed toxic
+combination (exposure + over-privilege + KEV/high-EPSS) to Critical. It is **off by
+default** and still read-only + B2-preserving; see
+[Appendix — enabling Stage 2 graph context](#appendix--enabling-stage-2-graph-context-cartography--neo4j).
+Still deliberately deferred (documented, not built): Trivy image/snapshot CVEs,
+DefectDojo system of record, Sigstore Rekor transparency, and — the hard line —
+**Phase 4–6 execution** (decide → apply → verify), which is where the architecture
+escalates beyond tool-less B2 to gated agentic tool-calling. Full design, rationale,
+and roadmap: **`DESIGN.md`**.
 
 ## Appendix — provisioning the read-only role
 
@@ -436,6 +443,110 @@ aws sts get-caller-identity --profile vulntriage-readonly
 VULNTRIAGE_AWS_PROFILE=vulntriage-readonly \
   python3 skills/aisec-vulntriage/collect.py --state /tmp/vt-role-test.json collect
 ```
+
+## Appendix — enabling Stage 2 graph context (Cartography + Neo4j)
+
+**Optional and off by default.** Stage 2 adds *asset-graph* context: instead of guessing
+internet exposure from a keyword heuristic, the collector reads deterministic
+`exposure_path` and `blast_radius` facts from a **Cartography**-populated **Neo4j** graph
+of your account. The graph-derived exposure overrides the keyword flag, blast-radius
+grounds excess-privilege in real IAM wildcard reach, and a graph-confirmed **toxic
+combination** (internet exposure ∧ over-privilege ∧ KEV/high-EPSS on one finding) floors
+that finding to **Critical**. It changes **nothing** about the security model: Cartography
+reads AWS with the **same read-only role**, the harness only issues **read** Cypher over
+Neo4j's HTTP endpoint, and the graph facts join the *trusted* collector metadata — no tool
+is added to the LLM. Full design and the empirical validation are in `DESIGN.md` §12.
+
+The harness **only queries** an already-populated Neo4j; it does **not** run Cartography
+for you. Standing up Neo4j and keeping the graph synced are operator steps (below), the
+same way you install and run Prowler.
+
+**Prerequisites (beyond the base ones):**
+- **Docker** (or Podman) to run Neo4j locally — and optionally to run Cartography.
+- **Cartography** (Apache-2.0) installed in an isolated venv, or run from a container.
+- The **same read-only AWS role** from the previous appendix — Cartography's default AWS
+  sync needs no IAM beyond `SecurityAudit` + `ViewOnlyAccess` (validated in `DESIGN.md`
+  §12.2 — the only `AccessDenied` is the optional `inspector2` module, which it skips).
+
+### 1. Start Neo4j (5.x, localhost-only)
+
+```bash
+docker run -d --name aisec-neo4j \
+  -p 127.0.0.1:7474:7474 -p 127.0.0.1:7687:7687 \
+  -e NEO4J_AUTH=neo4j/<choose-a-strong-password> \
+  neo4j:5.26-community
+```
+
+Neo4j **must be 5.x** — Cartography 0.138's Cypher uses Neo4j-5 syntax and errors on 4.4.
+**Bind to `127.0.0.1` only** (as above): the graph is a sensitive map of your asset
+topology and must never be network-exposed (`DESIGN.md` §12.3). `7474` is the HTTP Cypher
+port the harness queries; `7687` is bolt, which Cartography writes over.
+
+### 2. Give the harness the Neo4j password (a secret, via the environment)
+
+```bash
+export VULNTRIAGE_NEO4J_PASSWORD=<the-password-you-set-above>
+```
+
+This is a **secret** — it lives in the host environment / credential chain, **not** in
+`.env` (which is non-secret only, convention #3) and never in the repo. Export it in the
+same shell/service environment the cron job runs under.
+
+### 3. Populate the graph with Cartography (read-only)
+
+Using the read-only profile, so the sync reads AWS with zero mutate permissions:
+
+```bash
+AWS_PROFILE=vulntriage-readonly cartography \
+  --neo4j-uri bolt://localhost:7687 \
+  --neo4j-user neo4j --neo4j-password-env-var VULNTRIAGE_NEO4J_PASSWORD
+```
+
+> **If your host Python can't install Cartography**, run it from a `python:3.12`
+> container. (Cartography depends on `oci`, which pins `crc32c==2.7.1`; that has no wheel
+> for Python 3.14 and needs a compiler to build from source — so a host venv can fail on a
+> very new interpreter.) Put Neo4j and the Cartography container on a shared Docker network
+> and mount your AWS config read-only:
+>
+> ```bash
+> docker network create cartonet
+> docker network connect cartonet aisec-neo4j
+> docker run --rm --network cartonet \
+>   -v ~/.aws:/root/.aws:ro -e AWS_PROFILE=vulntriage-readonly \
+>   -e NEO4J_PW="$VULNTRIAGE_NEO4J_PASSWORD" python:3.12-slim bash -c \
+>   "pip install cartography && cartography --neo4j-uri bolt://aisec-neo4j:7687 \
+>      --neo4j-user neo4j --neo4j-password-env-var NEO4J_PW"
+> ```
+
+The graph is **derived and ephemeral** — fully re-syncable from the account, nothing to
+back up. **Re-run this sync before each triage run** (or on its own schedule) so the graph
+reflects current topology; a stale graph only yields stale *facts*, never a wrong action
+(the harness is read-only regardless).
+
+### 4. Turn the graph on
+
+In `config.toml`:
+
+```toml
+[graph]
+enabled = true
+```
+
+The `neo4j_http_endpoint` / `neo4j_user` / `neo4j_database` defaults
+(`http://localhost:7474`, `neo4j`, `neo4j`) already match the container above — override
+them in `[graph]` only if you changed them.
+
+### 5. Verify (read-only, no posting, no ledger writes)
+
+```bash
+python3 skills/aisec-vulntriage/collect.py graph-check
+```
+
+It prints how many findings joined to the graph and their `exposure_path` /
+`blast_radius` facts. If the graph is unreachable, the password is wrong, or a finding
+doesn't join, that finding **degrades gracefully** to v1's keyword exposure flag — the run
+never crashes and never blocks (same graceful-degrade contract as a down intel feed). When
+it looks right, your scheduled `run.py` picks up the graph facts automatically.
 
 ## Layout
 

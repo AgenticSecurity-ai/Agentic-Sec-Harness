@@ -343,8 +343,11 @@ the cross-harness session log; this checklist is the vulntriage-specific roadmap
      `build_rationale` records graph provenance + grounds `excess_privilege` with blast-radius,
      and `floor_priority` floors a graph-confirmed toxic combination to Critical. Details in
      **§12.10**.
-   - ⏳ **S2.4 Config/docs** — graph toggle (default off), `.env`/host wiring
-     (`CARTOGRAPHY_BIN`, Neo4j endpoint + credentials), README/SKILL updates.
+   - 🟡 **S2.4 Config/docs** — graph toggle (`[graph].enabled`, default off) shipped in
+     S2.2; **README "Appendix — enabling Stage 2 graph context" + SKILL "Stage 2" section
+     + `.env.example` note done (2026-07-06)**. No `CARTOGRAPHY_BIN`: the harness only
+     *queries* Neo4j, Cartography+Neo4j are operator-run out-of-band tools (docs say so).
+     Remaining: flip a live cron to `[graph].enabled=true` on a persisted Neo4j+Cartography.
 3. ⏳ **+ More collectors & audit-grade evidence** — Trivy (ECR image CVEs; then
    agentless EC2 snapshot scan), DefectDojo as system of record, and **Sigstore
    keyless + a Rekor transparency log** to move evidence signing off the host — the
@@ -531,9 +534,19 @@ layers (read-only IAM / tool-less B2 / deterministic-facts-win) hold as-is.
 - **S2.3 Wire graph facts** into the finding schema, the §5 rationale, and the priority
   floor; replace the keyword `internet_exposed` with the graph-derived `exposure_path`,
   keeping the keyword as the degrade path when the graph is unavailable.
-- **S2.4 Config/docs.** `config.toml` graph toggle (default **off** so v1 users are
-  unaffected and the harness degrades to keyword exposure), `.env`/host wiring
-  (`CARTOGRAPHY_BIN`, Neo4j HTTP endpoint + credential source), README/SKILL updates.
+- 🟡 **S2.4 Config/docs — docs DONE (2026-07-06).** `config.toml` graph toggle
+  (`[graph].enabled`, default **off** so v1 users are unaffected and the harness degrades
+  to keyword exposure) shipped in S2.2. Distribution docs now cover safe operator
+  enablement: README **"Appendix — enabling Stage 2 graph context (Cartography + Neo4j)"**
+  (Neo4j 5.x localhost-only container, Cartography sync under the read-only role incl. the
+  `python:3.12` container fallback, `VULNTRIAGE_NEO4J_PASSWORD` as a host-env secret,
+  `[graph].enabled=true`, `graph-check` verify), SKILL **"Stage 2 — graph context"**
+  section, and a `.env.example` note. **Correction to the earlier plan:** there is **no
+  `CARTOGRAPHY_BIN`** — `collect.py` only *queries* an already-populated Neo4j (HTTP
+  Cypher), so Cartography + Neo4j are operator-run **out-of-band** tools (Neo4j endpoint /
+  user / db are non-secret in `config.toml [graph]`; only the password is an env secret).
+  **Remaining:** stand up a *persisted* Neo4j + Cartography sync and flip a live cron to
+  `[graph].enabled=true` (the environment has been volatile across sessions — see §12.11).
 
 ### 12.7 Open questions (stage 2)
 
