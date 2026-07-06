@@ -725,3 +725,51 @@ pending** — it needs the Neo4j container + Cartography venv from S2.1/S2.2, wh
 present in this session's environment. S2.2's live Cypher (join 143 / exposure 9 / admin-like 19)
 is unchanged by S2.3 except the `exposed=None`-for-unmodeled refinement (which only relabels
 previously-`False` joined non-EC2/SG/S3 nodes).
+
+### 12.11 EC2→role blast-radius bridge — lighting up the toxic floor per finding (2026-07-06)
+
+The follow-up flagged in §12.10 is now implemented in `graph_facts()`. Previously the blast-radius
+query keyed only on a finding's **own** ARN, so it produced a `blast_radius` only when the finding's
+resource *was* an IAM principal (role/user). An EC2 instance finding — whose over-privilege lives on
+the role it assumes, not on the instance — never got one, so `exposed ∧ over_privileged ∧ KEV` could
+not co-occur on a single finding and the Critical toxic floor stayed dark.
+
+`graph_facts()` now walks the schema-confirmed bridge:
+- **3a** resolves each EC2 instance id → its attached role ARN(s) via
+  `(:EC2Instance)-[:INSTANCE_PROFILE]->(:AWSInstanceProfile)-[:ASSOCIATED_WITH]->(:AWSRole)` **and**
+  the direct `(:EC2Instance)-[:STS_ASSUMEROLE_ALLOW]->(:AWSRole)` edge.
+- **3b** widens the blast-radius query's ARN set to the union of finding-owned principals **and**
+  those discovered instance-roles, so both are scored in one pass.
+- In the per-finding loop, an EC2 finding with no own-ARN blast inherits the aggregated worst-case
+  blast of its role(s) (`admin_like` if **any** role is; max wildcard-statement counts — helper
+  `_blast_from_rows`). A `via_instance_role` field records the source role ARN(s) so the signed
+  evidence log stays honest that this privilege is the instance's *transitively*, not its own.
+
+Consumers (`graph_over_privileged`, `floor_priority` toxic combination, `build_rationale` provenance)
+were already wired in S2.3 and needed **no change** — they simply now see a `blast_radius` on exposed
+EC2 findings.
+
+**Verification:** offline test with a stubbed graph modelling both bridge shapes (8 scenarios, 25
+checks, all pass): toxic EC2 (exposed + admin role via instance profile + KEV) → **Critical**;
+multi-role worst-case → Critical; exposed EC2 with a non-privileged role → High not Critical; exposed
+EC2 with no role → High not Critical; direct IAM-role finding still attaches its own blast with no
+`via_instance_role` (regression); and `[graph]`-off / no-password / unreachable all degrade to the
+keyword flag without crashing.
+
+**Live confirmation (2026-07-06, real account 278059980943).** The environment was rebuilt from
+scratch — Neo4j 5.26 container + a fresh Cartography AWS sync via the restored read-only role.
+(Cartography ran in a `python:3.12` container: the host's new Python 3.14 has no wheel for `oci`'s
+pinned `crc32c==2.7.1` and no compiler, so a host venv couldn't build it.) The §12.10 confirmation
+queries resolved the open question: **`AWSInstanceProfile` count = 1 and the
+EC2→instance-profile→role bridge count = 1** — the bridge is real; the earlier empty graph was the
+account state (6 of 7 instances simply had no profile attached), not a Cartography gap. Running the
+harness's own `graph_facts()`/`graph_enrich()` (HTTP Cypher, the real code path) against the live
+graph confirmed **both graph legs on real data**: the bridged instance `i-0eb31fe7e6decd64e` inherits
+its instance-profile role's blast radius (`wildcard_service_stmts=3`, `allow_stmt_count=54`,
+`via_instance_role=[…BedrockAgentCore…]`) → `graph_over_privileged=True`; and all four public-IP
+instances resolve `exposure_path.exposed=True`. No single instance in this account is *both* exposed
+and over-privileged, so the toxic floor correctly stays at High on the real findings; feeding the
+instance's **real** inherited over-privilege + **real** KEV and toggling exposure on flips
+`floor_priority` `Low→Critical`, exercising the toxic combination end-to-end. The
+instance-profile→role edge needed neither an opt-in analysis job nor `permission_relationships` — it
+came from the normal sync, exactly as §12.10 predicted.

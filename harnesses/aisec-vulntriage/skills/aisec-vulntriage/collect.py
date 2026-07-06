@@ -539,6 +539,19 @@ def _empty_facts():
     }
 
 
+def _blast_from_rows(rows):
+    """Aggregate the wildcard-privilege proxy over one or more IAM-principal rows into a
+    single blast_radius dict. More than one row occurs when an EC2 instance assumes
+    multiple roles (§12.10 bridge); the finding inherits the WORST case — admin_like if
+    ANY role is, and the max wildcard-statement counts."""
+    return {
+        "admin_like": any((r.get("star") or 0) > 0 for r in rows),
+        "star_action_stmts": max((r.get("star") or 0) for r in rows),
+        "wildcard_service_stmts": max((r.get("wild") or 0) for r in rows),
+        "allow_stmt_count": max((r.get("allow") or 0) for r in rows),
+    }
+
+
 def graph_facts(graph_cfg, password, findings):
     """Query the Cartography graph for exposure_path + blast_radius facts for each
     finding's resource, keyed as in graph_key(). Returns {finding_id: facts}. Raises
@@ -583,10 +596,27 @@ def graph_facts(graph_cfg, password, findings):
         "coalesce(b.block_public_acls,false) AS bpa, "
         "coalesce(b.restrict_public_buckets,false) AS rpb", arns=arns)}
 
-    # 3) blast radius — for resources that ARE an IAM principal (role/user). Without
+    # 3a) EC2 -> role bridge (DESIGN §12.10). An EC2 instance finding's own resource is not
+    # an IAM principal, so its over-privilege lives on the role the instance assumes.
+    # Cartography's normal sync models both the instance-profile path and a direct
+    # assume-role edge, so we resolve each instance's attached role(s) here and inherit
+    # their blast radius below. This is what lets the toxic-combination floor fire on an
+    # exposed, over-privileged instance PER FINDING (was computed separately before).
+    ec2_roles = {r["key"]: r["role_arns"] for r in q(
+        "UNWIND $ids AS iid MATCH (i:EC2Instance {id:iid}) "
+        "OPTIONAL MATCH (i)-[:INSTANCE_PROFILE]->(:AWSInstanceProfile)"
+        "-[:ASSOCIATED_WITH]->(r1:AWSRole) "
+        "OPTIONAL MATCH (i)-[:STS_ASSUMEROLE_ALLOW]->(r2:AWSRole) "
+        "WITH iid, collect(DISTINCT r1.arn) + collect(DISTINCT r2.arn) AS ras "
+        "RETURN iid AS key, [x IN ras WHERE x IS NOT NULL] AS role_arns", ids=ids)}
+
+    # 3b) blast radius — for resources that ARE an IAM principal (role/user). Without
     # the opt-in permission_relationships mapping the graph has no CAN_ACCESS edges to
     # specific resources, so we use the strongest available proxy: wildcard-privilege
-    # policy statements attached to the principal (DESIGN §12.8 records this limit).
+    # policy statements attached to the principal (DESIGN §12.8 records this limit). The
+    # keyed arn set spans both finding-owned principals AND EC2-attached roles (3a).
+    role_arns = {ra for lst in ec2_roles.values() for ra in lst}
+    blast_arns = sorted(set(arns) | role_arns)
     blast = {r["key"]: r for r in q(
         "UNWIND $arns AS a MATCH (pr) WHERE pr.arn=a AND (pr:AWSRole OR pr:AWSUser) "
         "OPTIONAL MATCH (pr)-[:POLICY]->(:AWSPolicy)-[:STATEMENT]->"
@@ -594,7 +624,7 @@ def graph_facts(graph_cfg, password, findings):
         "WITH a, collect(s) AS ss RETURN a AS key, "
         "size([x IN ss WHERE any(act IN x.action WHERE act='*')]) AS star, "
         "size([x IN ss WHERE any(act IN x.action WHERE act ENDS WITH ':*')]) AS wild, "
-        "size(ss) AS allow", arns=arns)}
+        "size(ss) AS allow", arns=blast_arns)}
 
     out = {}
     for f in findings:
@@ -629,13 +659,16 @@ def graph_facts(graph_cfg, password, findings):
             facts["exposure_path"]["exposed"] = bool(reasons) if modeled else None
 
         if arn in blast:
-            row = blast[arn]
-            facts["blast_radius"] = {
-                "admin_like": (row.get("star") or 0) > 0,
-                "star_action_stmts": row.get("star") or 0,
-                "wildcard_service_stmts": row.get("wild") or 0,
-                "allow_stmt_count": row.get("allow") or 0,
-            }
+            facts["blast_radius"] = _blast_from_rows([blast[arn]])
+        elif fid_key in ec2_roles and ec2_roles[fid_key]:
+            # EC2 instance finding: inherit the blast radius of the role(s) it assumes via
+            # the instance-profile / assume-role bridge (§12.10). `via_instance_role` keeps
+            # the provenance honest in the signed evidence log — this privilege is the
+            # instance's transitively, not its own.
+            rows = [blast[ra] for ra in ec2_roles[fid_key] if ra in blast]
+            if rows:
+                facts["blast_radius"] = _blast_from_rows(rows)
+                facts["blast_radius"]["via_instance_role"] = ec2_roles[fid_key]
         out[f["id"]] = facts
     return out
 
