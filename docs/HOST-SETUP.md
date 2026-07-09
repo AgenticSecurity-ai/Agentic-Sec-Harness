@@ -10,6 +10,11 @@ credentials. No harness directory ever contains credentials.
 > The default path below assumes **AWS Bedrock (Claude)** as the model and **Discord**
 > as the output channel — what these harnesses are built for. Alternatives are noted.
 
+> **Rebuilding after a wipe?** If this host was set up before and its runtime was lost
+> (e.g. a WSL reset), don't redo this by hand — see [PERSISTENCE.md](PERSISTENCE.md) for
+> the durability map and [`ops/bootstrap.sh`](../ops/bootstrap.sh), which re-derives the
+> deterministic parts and tells you which secret steps still need you.
+
 ---
 
 ## 0. Prerequisites
