@@ -127,6 +127,9 @@ full_digest_weekday = "mon"
 # the graph from the SAME read-only role; the collector only QUERIES it over Neo4j's
 # HTTP Cypher endpoint with stdlib urllib (no bolt driver). The Neo4j password is a
 # SECRET and lives in the environment (VULNTRIAGE_NEO4J_PASSWORD), never here or in .env.
+# Leave this false in the tracked config; a deployment turns graph mode on with the
+# non-secret env var VULNTRIAGE_GRAPH_ENABLED=true (like the channel id), so upstream
+# pulls never revert it. See README "Appendix — enabling Stage 2 graph context".
 enabled = false
 
 # Neo4j HTTP transactional Cypher endpoint. Bind Neo4j to localhost only — the graph is

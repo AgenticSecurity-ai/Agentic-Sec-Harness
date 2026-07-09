@@ -536,6 +536,13 @@ The `neo4j_http_endpoint` / `neo4j_user` / `neo4j_database` defaults
 (`http://localhost:7474`, `neo4j`, `neo4j`) already match the container above — override
 them in `[graph]` only if you changed them.
 
+Prefer **not** editing the shipped `enabled = false` if you keep this harness in a git
+working tree that tracks upstream: set the non-secret env var **`VULNTRIAGE_GRAPH_ENABLED=true`**
+in your deployment `.env` instead. It overrides the config default, so the committed file
+stays `false` (nothing to reconcile on `git pull`) — the same "deployment values live in
+`.env`" pattern as the channel id. Either way, the Neo4j **password** stays in the host
+environment (`VULNTRIAGE_NEO4J_PASSWORD`), never in `.env` or config.
+
 ### 5. Verify (read-only, no posting, no ledger writes)
 
 ```bash

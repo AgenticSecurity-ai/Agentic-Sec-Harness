@@ -673,8 +673,22 @@ def graph_facts(graph_cfg, password, findings):
     return out
 
 
+def _graph_enabled(graph_cfg):
+    """Whether Stage-2 graph enrichment is on. A deployment can flip it with the
+    VULNTRIAGE_GRAPH_ENABLED env var — a NON-SECRET deployment value, like the Discord
+    channel id (convention #3) — WITHOUT editing the shipped config default, which stays
+    `[graph].enabled=false` so self-hosters are unaffected and never need a live Neo4j.
+    Env, when set to a non-empty value, wins; otherwise fall back to [graph].enabled.
+    (The Neo4j password is a SECRET and stays in the host environment, never in config
+    or .env — see VULNTRIAGE_NEO4J_PASSWORD.)"""
+    env = os.environ.get("VULNTRIAGE_GRAPH_ENABLED")
+    if env is not None and env.strip() != "":
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    return bool(graph_cfg.get("enabled", False))
+
+
 def graph_enrich(items, cfg):
-    """Stage 2.3: when [graph].enabled, attach Cartography graph facts to each finding
+    """Stage 2.3: when graph enrichment is enabled, attach Cartography graph facts to each
     and let the graph-derived exposure_path OVERRIDE the v1 keyword `internet_exposed`
     flag for the node types the graph models (EC2 instance / security group / S3 bucket).
     A joined node of any other type, an unjoined resource, a missing password, a disabled
@@ -685,7 +699,7 @@ def graph_enrich(items, cfg):
     LLM never sets them and the deterministic priority floor (run.py) reads them, so a
     compromised LLM cannot talk a graph-confirmed toxic combination down."""
     gcfg = cfg.get("graph", {})
-    if not gcfg.get("enabled", False):
+    if not _graph_enabled(gcfg):
         return items
     password = os.environ.get("VULNTRIAGE_NEO4J_PASSWORD", "")
     if not password:
