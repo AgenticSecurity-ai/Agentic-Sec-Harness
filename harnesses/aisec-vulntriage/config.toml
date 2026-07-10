@@ -137,3 +137,40 @@ enabled = false
 neo4j_http_endpoint = "http://localhost:7474"
 neo4j_user = "neo4j"
 neo4j_database = "neo4j"
+
+[trivy]
+# Stage 3 Trivy collector (image/package CVEs) — see DESIGN.md §13. OFF by default:
+# v1/Stage-1/Stage-2 users are unaffected. Prowler is a CSPM scanner whose findings
+# rarely carry a CVE, so the KEV/EPSS/NVD enrichment usually has nothing to score;
+# Trivy findings ARE CVEs and light that pipeline up. Still READ-ONLY and B2-preserving:
+# Trivy is an external pinned CLI (like Prowler), run as a deterministic subprocess whose
+# JSON is normalized to the common finding schema; its CVEs flow into the SAME enrich →
+# floor → digest → evidence → ledger chain with no other change. A deployment turns it on
+# with the non-secret env var VULNTRIAGE_TRIVY_ENABLED=true (like the channel id / graph
+# toggle), so an upstream pull never reverts it; leave this false in the tracked config.
+enabled = false
+
+# Pinned Trivy CLI. The collector runs `trivy --version` and refuses to run if the
+# installed version does not start with this string (supply-chain hygiene, like the
+# Prowler pin). Trivy's current series is 0.x, so "0." allows patch/minor drift; set a
+# full version ("0.58.1") to pin exactly. Empty = skip the check.
+version = "0."
+
+# Explicit image references to scan. This is the DEFAULT, portable path and needs NO
+# AWS permissions — Trivy just pulls from a registry you already have creds for, so the
+# read-only guarantee is untouched. Examples:
+#   targets = ["ghcr.io/your-org/api:latest", "123456789012.dkr.ecr.us-east-1.amazonaws.com/app:prod"]
+targets = []
+
+# ECR auto-discovery (enumerate the account's ECR repos and scan each). This is the ONE
+# place the read-only surface could widen: pulling ECR images needs the data-plane actions
+# ecr:GetAuthorizationToken / BatchGetImage / GetDownloadUrlForLayer, which SecurityAudit/
+# ViewOnlyAccess do NOT grant. OFF by default so the shipped role stays unchanged; a
+# deployer who enables it consciously accepts those extra (still read-only) actions. See
+# DESIGN §13.3 and the README appendix. (Recognized in S3.1; enumeration is a follow-up —
+# for now configure explicit `targets`.)
+ecr_discovery = false
+
+# Coarse severity pre-filter for Trivy findings (before the LLM triage), same idea as
+# [prowler].severities. Empty = keep all. Unknown/unscored ('') is always kept.
+severities = ["critical", "high", "medium"]

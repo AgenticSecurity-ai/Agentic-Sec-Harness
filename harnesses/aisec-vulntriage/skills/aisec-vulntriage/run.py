@@ -347,13 +347,19 @@ def format_post(item, priority, rationale):
     asset = item.get("resource_name") or item.get("resource") or item.get("check_id")
     ref = item["cve_ids"][0] if item.get("cve_ids") else item["check_id"]
     kev = "yes" if rationale["kev_listed"] else "no"
-    epss = f"{rationale['epss']:.2f}" if item.get("cve_ids") else "n/a"
+    # "n/a" unless the EPSS feed actually scored one of this finding's CVEs. Keying on
+    # cve_ids presence would print a real-looking "0.00" for an unscored CVE (finding_epss
+    # returns a 0.0 default) — misleading now that every Trivy finding is CVE-bearing.
+    epss = f"{rationale['epss']:.2f}" if item.get("epss") else "n/a"
     exposure = "internet" if rationale["internet_exposed"] else "internal"
     # Source line from TRUSTED collector data only (the LLM never echoes ids/urls).
+    # Label by the finding's real collector so provenance is honest (a Trivy CVE must
+    # not read as a Prowler check — DESIGN §13.4).
+    label = "Trivy" if item.get("source") == "trivy" else "Prowler"
     if item.get("cve_ids"):
-        src = f"Prowler: {item['check_id']}  |  https://nvd.nist.gov/vuln/detail/{item['cve_ids'][0]}"
+        src = f"{label}: {item['check_id']}  |  https://nvd.nist.gov/vuln/detail/{item['cve_ids'][0]}"
     else:
-        src = f"Prowler: {item['check_id']}"
+        src = f"{label}: {item['check_id']}"
     return (f"🛡️ **[{priority}] {asset} — {ref}**\n"
             f"📊 KEV: {kev}  |  EPSS: {epss}  |  Exposure: {exposure}\n"
             f"{rationale['summary']}\n"

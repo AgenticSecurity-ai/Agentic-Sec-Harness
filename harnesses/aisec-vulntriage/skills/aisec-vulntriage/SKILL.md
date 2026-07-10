@@ -169,6 +169,33 @@ guarantees.
   `collect.py graph-check`. Operator setup runbook: README
   "Appendix — enabling Stage 2 graph context"; design + validation: `DESIGN.md` §12.
 
+## Stage 3 — Trivy collector (opt-in, off by default)
+
+When `[trivy].enabled = true` (or the non-secret env toggle `VULNTRIAGE_TRIVY_ENABLED=true`),
+the collector adds a **second source**: Trivy image/package CVEs, merged alongside Prowler's
+CSPM findings. This is an add-on, not a new class of behavior — it feeds the *existing*
+enrichment + floor pipeline and does not touch the B2 or read-only guarantees.
+
+- **Why it matters.** Prowler findings are misconfigurations and rarely carry a CVE, so the
+  KEV/EPSS/NVD enrichment usually has nothing to score. Every Trivy finding *is* a CVE, so
+  it lights that pipeline up — the deterministic KEV/high-EPSS priority floor finally has
+  CVEs to act on.
+- **Trivy is an external tool**, run exactly like Prowler: a **pinned CLI subprocess**
+  (`run_trivy_image()`), version-checked against `[trivy].version`, whose JSON is normalized
+  to the **same common finding schema** (`normalize_trivy()`) so `enrich()` / the floor /
+  digest / evidence / ledger consume it unchanged. `cmd_collect` merges Trivy items **before**
+  `enrich()`. Trivy ids are namespaced (`trivy|…`) so they never collide with Prowler uids.
+- **Read-only surface.** Scanning explicit image refs (`[trivy].targets`) needs **no AWS
+  permissions** — Trivy just pulls from a registry you already authenticate to. The one
+  opt-in that widens the surface is `ecr_discovery` (needs ECR data-plane pull actions);
+  it is off by default (`DESIGN.md` §13.3).
+- **Graceful degrade.** Trivy off, or no `targets`, or a failed image pull → that image is
+  simply skipped/absent; the run never crashes and Prowler findings post as usual.
+- **Untrusted DATA (B2).** A vulnerability `Description` (attacker-influenceable via a crafted
+  image) is fenced as DATA for the tool-less LLM, never interpreted — verified in `DESIGN.md`
+  §13.7. Operator setup runbook: README "Appendix — enabling Stage 3 Trivy"; design +
+  validation: `DESIGN.md` §13.
+
 ## Data feeds / terms
 
 CVE enrichment uses free public feeds via their public APIs — **CISA KEV** (catalog
