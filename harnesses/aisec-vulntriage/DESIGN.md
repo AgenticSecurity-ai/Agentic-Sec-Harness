@@ -287,7 +287,7 @@ mutation forces agentic tools and load-bearing governance. The stage-level plan 
 stable; the sub-milestone checklist under stage 1 is the live progress view.
 
 Status legend: ✅ done · 🟡 in progress / unmerged · ⏳ planned, not started.
-Sub-milestone status is current as of 2026-07-03 (see the repo-root `STATUS.md` for
+Sub-milestone status is current as of 2026-07-10 (see the repo-root `STATUS.md` for
 the cross-harness session log; this checklist is the vulntriage-specific roadmap view).
 
 1. **v1 — walking skeleton** (this doc) — Prowler + feeds + AI triage + Discord +
@@ -343,16 +343,35 @@ the cross-harness session log; this checklist is the vulntriage-specific roadmap
      `build_rationale` records graph provenance + grounds `excess_privilege` with blast-radius,
      and `floor_priority` floors a graph-confirmed toxic combination to Critical. Details in
      **§12.10**.
-   - 🟡 **S2.4 Config/docs** — graph toggle (`[graph].enabled`, default off) shipped in
-     S2.2; **README "Appendix — enabling Stage 2 graph context" + SKILL "Stage 2" section
-     + `.env.example` note done (2026-07-06)**. No `CARTOGRAPHY_BIN`: the harness only
-     *queries* Neo4j, Cartography+Neo4j are operator-run out-of-band tools (docs say so).
-     Remaining: flip a live cron to `[graph].enabled=true` on a persisted Neo4j+Cartography.
-3. ⏳ **+ More collectors & audit-grade evidence** — Trivy (ECR image CVEs; then
-   agentless EC2 snapshot scan), DefectDojo as system of record, and **Sigstore
-   keyless + a Rekor transparency log** to move evidence signing off the host — the
-   non-repudiation the v1 local-PEM path deliberately does not provide (§3.5). KMS-
-   delegated signing is the in-AWS alternative.
+   - ✅ **S2.4 Config/docs** — graph toggle (`[graph].enabled`, default off) shipped in
+     S2.2; README "Appendix — enabling Stage 2 graph context" + SKILL "Stage 2" section
+     + `.env.example` note (PR #25). No `CARTOGRAPHY_BIN`: the harness only *queries*
+     Neo4j, Cartography+Neo4j are operator-run out-of-band tools (docs say so).
+   - ✅ **S2.5 Env toggle + live cutover** — non-secret `VULNTRIAGE_GRAPH_ENABLED`
+     env toggle (`collect.py` `_graph_enabled`) so an in-place deployment turns graph
+     mode on without a config-drift edit `git pull` would revert (PR #27); live cron
+     `vulntriage-weekday` cut over to graph mode with the Neo4j password injected via
+     `--command-env`, smoke-verified then enabled. **Graph mode is live.**
+3. 🟡 **+ More collectors & audit-grade evidence** — three independent tracks: **Trivy**
+   (image/package CVEs), **DefectDojo** (system of record), and **off-host signing**
+   (Sigstore keyless + Rekor / KMS) to move evidence signing off the host — the
+   non-repudiation the v1 local-PEM path deliberately does not provide (§3.5). The Trivy
+   track is detailed in **§13**. Sub-milestones (Trivy first, as its own PR):
+   - ✅ **S3.0 Design annex** — §13: Trivy scope (image refs default / ECR opt-in),
+     the ECR-pull IAM fork + recommendation, schema mapping, dedup key, B2 preservation.
+   - ✅ **S3.1 Trivy collector** — `collect.py` `run_trivy_image()` + `normalize_trivy()`
+     + `collect_trivy()`, `[trivy]` config (default off), `VULNTRIAGE_TRIVY_ENABLED` env
+     toggle, `--trivy-output` dry-run; `cmd_collect` merges Trivy CVE findings before
+     `enrich()` so they feed KEV/EPSS/NVD. `run.py` `format_post` labels source honestly.
+   - ✅ **S3.2 Live verification** — real Trivy scan of a Log4Shell image → first non-empty
+     KEV/EPSS enrichment on real data, floor → Critical on 5 KEV findings, digest posted
+     intact; live ledger/evidence untouched (§13.7).
+   - 🟡 **S3.3 Config/docs** — README "Appendix — enabling Stage 3 Trivy" (incl. the
+     ECR-discovery IAM note), SKILL "Stage 3" section, `.env.example`, this §8 sync.
+   - ⏳ **S3.4 DefectDojo** — push signed verdicts to DefectDojo as the system of record
+     (separate PR).
+   - ⏳ **S3.5 Off-host signing** — Sigstore keyless + Rekor / KMS-delegated signing;
+     delivers the non-repudiation the v1 local-PEM path does not (separate PR).
 4. ⏳ **Phase 4–6 (execution)** — *this* is where the architecture escalates beyond B2:
    the tool-less orchestrator model gives way to **agentic tool_call** with tier-2
    mutating tools, and the governance the report specifies becomes load-bearing —
@@ -786,3 +805,188 @@ instance's **real** inherited over-privilege + **real** KEV and toggling exposur
 `floor_priority` `Low→Critical`, exercising the toxic combination end-to-end. The
 instance-profile→role edge needed neither an opt-in analysis job nor `permission_relationships` — it
 came from the normal sync, exactly as §12.10 predicted.
+
+## 13. Stage 3 design annex — Trivy collector (image/package CVEs)
+
+> **Status: design draft for stage 3 — sub-milestone S3.1 in progress.** This annex is the
+> detailed expansion of the **first** of roadmap item **§8.3**'s three tracks (Trivy →
+> DefectDojo → off-host signing). It is scoped to **Trivy only**; DefectDojo (system of
+> record) and off-host signing (Sigstore keyless + Rekor / KMS) are separate later
+> sub-milestones (S3.4 / S3.5) with their own annexes. Stage 3 stays **read-only and
+> B2-preserving** — like Cartography and Prowler, Trivy is an *external tool run as a
+> deterministic subprocess*; it adds a new *input source*, not agentic tools or mutation.
+
+### 13.1 What Trivy buys — it fills the enrichment pipeline that has always been empty
+
+The harness already ships a complete CVE intel pipeline — `enrich()` attaches CISA **KEV**
+membership, FIRST **EPSS** score, and (opt-in) **NVD** CVSS to any CVE id a finding carries,
+and the deterministic **priority floor** (§5, Layer 3) escalates KEV / high-EPSS findings so a
+compromised LLM cannot talk them down. But Prowler is a **CSPM** scanner: its findings are
+misconfigurations, and they almost never reference a CVE. Every production run to date logs
+
+```
+[enrich] no CVE ids referenced by findings; skipping intel feeds
+         (expected for CSPM-only v1 — CVE coverage grows with Trivy in stage 3)
+```
+
+Trivy is a **vulnerability (SCA/package) scanner**: every finding it emits *is* a CVE, with a
+package, an installed vs fixed version, and a severity. Adding Trivy as a second collector
+therefore lights up the KEV/EPSS/NVD path **for the first time on real data** — no new
+enrichment code, no new floor logic. The CVEs flow straight into the existing `enrich()` →
+sort → floor → graph → digest → evidence → dedup chain. This is why Trivy is the highest-value,
+lowest-risk of Stage 3's three tracks: it is almost entirely *reuse*.
+
+### 13.2 Scan targets, and the account reality (measured)
+
+Trivy scans an **artifact**, most usefully a container image (`trivy image <ref>`), but also a
+filesystem/rootfs or an SBOM. Three target shapes are relevant here:
+
+1. **Explicit image refs** (`[trivy].targets = ["ghcr.io/org/app:tag", …]`) — Trivy pulls and
+   scans them with **no AWS involvement at all**. This is the default, portable path and the
+   one that keeps the read-only guarantee completely untouched (§13.3).
+2. **ECR auto-discovery** — enumerate the account's ECR repositories, resolve the latest (or
+   tagged) image per repo, and scan each. This is the AWS-native path named in §8.3, and the
+   only one that touches IAM (§13.3).
+3. **Agentless EC2 snapshot scan** (`trivy` on a mounted EBS snapshot) — the heavier second
+   Trivy mode §8.3 foreshadows. **Out of scope for S3.1**; noted for a later sub-milestone.
+
+**Measured account state (2026-07-10, account 278059980943, read-only role):**
+`ecr describe-repositories` returns **0 repositories**. So ECR auto-discovery has nothing to
+scan on this account — exactly the `via_instance_role` situation from Stage 2: an *account-state*
+gap, not a wiring gap. The design consequence is that **live verification (S3.2) must not depend
+on ECR**. It scans an explicit, pinned, publicly-known-vulnerable image ref (target shape 1) to
+produce **real** CVEs and exercise the KEV/EPSS→floor→digest→evidence path end-to-end, and proves
+the ECR path (shape 2) separately against a captured-output fixture — the same "prove the wiring
+offline, don't let account state decide correctness" discipline Stage 2 established.
+
+### 13.3 IAM — the read-only surface, and the one place it would widen
+
+The default path (explicit image refs) needs **no AWS permissions** — Trivy just pulls from a
+registry the operator already has creds for. The read-only guarantee (Layer 1, §3.1) is
+untouched. This matters: the safety story does not regress for the common case.
+
+**ECR auto-discovery** is the one place the surface could widen, and there is a genuine fork:
+
+- **(A) Trivy pulls & scans the image itself.** Trivy needs the ECR **data-plane pull** actions
+  `ecr:GetAuthorizationToken`, `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer` (plus the
+  `ecr:Describe*` the role already has). `SecurityAudit` / `ViewOnlyAccess` grant the *describe*
+  actions but **not** the layer-pull actions — so this path **adds three actions** to
+  `prowler-additions`. They are still read-only (no mutation), but they let the role **read image
+  contents**, a real (if modest) widening of what "read-only" reads. Trivy is the portable,
+  registry-agnostic scanner §8.3 names → richest coverage.
+- **(B) Consume ECR-native scan findings.** If the repo has Amazon Inspector / basic ECR
+  scanning enabled, `ecr:DescribeImageScanFindings` (covered by `SecurityAudit`) returns CVEs
+  **without pulling the image** — zero IAM change, zero image-content read. But it is not Trivy
+  (coverage is ECR's scanner, only works where scanning is enabled) and it is a different
+  normalizer.
+
+**Recommendation (for S3.1):** ship **(A) Trivy** as the scanner because it is what §8.3 commits
+to and it is portable, but keep **ECR auto-discovery OFF by default** and gate it behind an
+explicit `[trivy].ecr_discovery = true`. The default distribution therefore adds **no IAM and no
+image-content read** — a deployer who opts into ECR discovery consciously accepts the three
+extra pull actions, which the README documents as the single point where the read-only surface
+widens. (B) is recorded as the zero-IAM alternative for Inspector-enabled shops; implementing it
+is deferred. This keeps the invariant intact for everyone who doesn't opt in.
+
+### 13.4 Invocation & schema mapping (mirrors the Prowler collector exactly)
+
+Trivy is invoked exactly like Prowler (§3, `run_prowler`): a **pinned CLI subprocess** whose
+`--version` must start with a configured prefix (supply-chain hygiene — a surprise upgrade can
+change output shape), run in an isolated install off the volatile scratchpad, emitting JSON to a
+temp dir that `collect.py` reads. New code is `run_trivy()` + `normalize_trivy()`, structurally
+twins of `run_prowler()` + `normalize()`.
+
+Trivy `image --format json` yields `Results[].Vulnerabilities[]`. Mapping one vulnerability to
+the **existing common finding schema** (§ `normalize`):
+
+| common schema field | Trivy source |
+|---|---|
+| `source` | `"trivy"` (Prowler findings are `"prowler"`) |
+| `id` (dedup key) | `trivy\|<image-digest-or-ref>\|<Target>\|<PkgName>\|<VulnerabilityID>` — stable across runs for the same package+CVE+image |
+| `cve_ids` | `[VulnerabilityID]` when it matches `CVE_RE` (Trivy also emits non-CVE advisory ids — GHSA/DLA; keep them in `title`, only CVE-shaped ids go in `cve_ids` so they reach `enrich()`) |
+| `severity` | `Severity` lowercased → existing `VALID_SEVERITIES` (`critical/high/medium/low`) |
+| `title` | `"<PkgName> <VulnerabilityID> — <Title>"` |
+| `resource` / `resource_type` / `resource_name` | image ref / `"container_image"` / `ArtifactName` |
+| `description` / `risk` / `remediation` | `Description` / `PrimaryURL` refs / `"upgrade <PkgName> <InstalledVersion> → <FixedVersion>"` — all **untrusted DATA**, fenced by the orchestrator, never interpreted |
+| `internet_exposed`, `graph` | left at schema defaults; the image itself has no network path — exposure/blast belong to the *asset running the image*, a stage-2 join deferred here |
+
+Because the schema is shared, everything downstream — `enrich()`, the KEV/EPSS/exposure sort key,
+the priority floor, digest folding, evidence hash-chain, the post-then-mark ledger — consumes
+Trivy findings **with no change**. `cmd_collect` merges Trivy items into the Prowler item list
+**before** `enrich()` so the CVE feeds fire over the union.
+
+### 13.5 B2 preservation (unchanged invariant)
+
+Trivy is an **external deterministic subprocess**, identical in trust posture to Prowler and
+Cartography: the orchestrator runs it, parses its JSON with defensive `.get` chains, and passes
+the resulting strings to the tool-less LLM as fenced DATA. Untrusted image/package text (a
+vulnerability `Description`, a crafted image label) can at most corrupt a summary string — it
+never becomes a command, never touches the host, the ledger, or other channels. The B2 boundary
+(§3.1) is exactly where it was; Stage 3's Trivy track does **not** move it (that is Stage 4).
+
+### 13.6 Config & distribution defaults
+
+A new `[trivy]` section, **`enabled = false`** in the tracked config (same discipline as
+`[graph]`): v1/Stage-1 and Stage-2 users are unaffected, and a deployment turns it on with the
+non-secret env toggle `VULNTRIAGE_TRIVY_ENABLED=true` (mirrors `VULNTRIAGE_GRAPH_ENABLED`) so an
+upstream `git pull` never reverts it. Keys: `enabled`, `version` (pin prefix), `targets` (explicit
+image refs), `ecr_discovery` (default false — the IAM-widening opt-in, §13.3), `severities`
+(pre-filter). A `--trivy-output <path>` dry-run flag mirrors `--prowler-output` for offline
+fixture runs (no pull, no AWS).
+
+### 13.7 Verification strategy (account-state-independent)
+
+Mirrors S1.5 / S2.1's discipline — prove the wiring on real data where possible, offline where
+account state blocks it:
+
+1. **Real CVE path, live (the headline):** `trivy image <pinned-vulnerable-image>` → real CVEs →
+   full `run.py` on a **temporary ledger** → confirm **KEV/EPSS enrich fires non-empty for the
+   first time**, the floor escalates a KEV CVE, the digest posts intact (one finding per message,
+   mid-block-split zero, verified by **reading the real Discord channel**), evidence hash-chains,
+   dedup is idempotent → restore the real ledger/evidence to a byte-identical sha256 (the
+   S1.8/S2.5 method — leave a Discord trace, never dirty the live ledger).
+2. **ECR path, offline:** captured `trivy` JSON fixture through `--trivy-output` proves
+   `normalize_trivy()` + merge + dedup independent of the account's 0 ECR repos.
+
+**Live confirmation (2026-07-10).** Trivy 0.72.0 (run containerized via `aquasec/trivy`,
+the same "heavy external tool, isolated" pattern as Cartography's `python:3.12`) scanned
+`ghcr.io/christophetd/log4shell-vulnerable-app` through the real `collect.py` → `run.py`
+path on a throwaway workspace copy (live ledger/evidence untouched — the S1.8/S2.5
+method). Results: 18 critical findings, **13 CVEs enriched, EPSS scored 13/13, and 5
+KEV-listed findings** (CVE-2021-44228 Log4Shell EPSS 0.99999, CVE-2021-45046,
+CVE-2025-24813 Tomcat, CVE-2022-22965 Spring4Shell ×2). The **KEV/EPSS enrichment fired
+non-empty for the first time on real data** (Prowler-only runs always logged "no CVE
+ids"), the deterministic floor pinned all five KEV findings to Critical, and the digest
+posted **8 messages intact** (header + 6 detail + footer, mid-block-split zero, verified
+by reading the real channel) each carrying the `KEV: yes` badge. Live `seen-count`
+stayed 166 and `evidence.py verify` stayed `ok=True checked=166`. One provenance bug
+surfaced and was fixed: `run.py` `format_post` hard-coded a `Prowler:` source label, so
+Trivy CVEs mislabelled their collector — now `Trivy:` vs `Prowler:` by `item["source"]`.
+An earlier offline dry-run (synthetic Log4Shell fixture via `--trivy-output`) had already
+confirmed KEV=`true` / EPSS=0.99999 enrichment, package-scoped dedup ids, the
+severity pre-filter, and that an injected instruction string in a vulnerability
+`Description` stays inert DATA (B2).
+
+**Review hardening (2026-07-10).** A multi-angle code review of the Trivy diff surfaced
+three contract defects, all fixed: (1) a Trivy **setup** failure (binary missing /
+version-pin mismatch) raised out of `collect_trivy` and sank the *entire* run, discarding
+Prowler findings — now caught so Trivy **degrades to Prowler-only** like a down feed
+(the one-time version/binary error, not just per-image pull failures, is inside the
+guard); (2) `run.py` `format_post` printed `EPSS: 0.00` for a CVE the EPSS feed never
+scored (the `finding_epss` 0.0 default read as a real score) — now `n/a` unless a score
+exists, which matters because every Trivy finding is CVE-bearing; (3) a `--prowler-output`
+offline replay ("no AWS calls") still triggered **live** Trivy image pulls — now a Prowler
+dry run only includes Trivy findings from a captured `--trivy-output`, never a live scan.
+Deferred to follow-ups (logged, not fixed here): dedup-id stability across `:latest`
+rebuilds, `[trivy].severities` falling back to `[prowler].severities` when unset,
+`ecr_discovery` failing loud instead of silently scanning nothing, and a shared
+`make_finding()` schema constructor.
+
+### 13.8 Sub-milestones (this PR = S3.0–S3.3)
+
+- **S3.0 Design annex** — this §13.
+- **S3.1 Trivy collector** — `run_trivy()` + `normalize_trivy()` + `[trivy]` config + `--trivy-output` dry-run + `cmd_collect` merge; env toggle `VULNTRIAGE_TRIVY_ENABLED`.
+- **S3.2 Live verification** — pinned vulnerable image → real KEV/EPSS first-light → temp-ledger e2e → byte-identical restore.
+- **S3.3 Config/docs distribution** — README "Appendix — enabling Stage 3 Trivy" (incl. the ECR-discovery IAM note), SKILL "Stage 3" section, `.env.example`, DESIGN §8 roadmap sync (also correct the stale S2.4/S2.5 markers).
+- **S3.4 DefectDojo** (system of record) — *deferred, separate PR.*
+- **S3.5 Off-host signing** (Sigstore keyless + Rekor / KMS) — *deferred, separate PR; delivers the non-repudiation the v1 local-PEM path deliberately does not (§3.5).*

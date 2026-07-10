@@ -359,11 +359,15 @@ excess-privilege in real IAM blast-radius, and floors a graph-confirmed toxic
 combination (exposure + over-privilege + KEV/high-EPSS) to Critical. It is **off by
 default** and still read-only + B2-preserving; see
 [Appendix — enabling Stage 2 graph context](#appendix--enabling-stage-2-graph-context-cartography--neo4j).
-Still deliberately deferred (documented, not built): Trivy image/snapshot CVEs,
-DefectDojo system of record, Sigstore Rekor transparency, and — the hard line —
-**Phase 4–6 execution** (decide → apply → verify), which is where the architecture
-escalates beyond tool-less B2 to gated agentic tool-calling. Full design, rationale,
-and roadmap: **`DESIGN.md`**.
+**Stage 3 Trivy (image/package CVEs) is also available as an opt-in add-on** — Prowler is
+a CSPM scanner whose misconfig findings rarely carry a CVE, so the KEV/EPSS enrichment
+usually has nothing to score; Trivy findings *are* CVEs and feed that same enrichment +
+priority-floor pipeline unchanged. Also off by default, read-only, B2-preserving; see
+[Appendix — enabling Stage 3 Trivy](#appendix--enabling-stage-3-trivy-imagepackage-cves).
+Still deliberately deferred (documented, not built): DefectDojo system of record,
+off-host signing (Sigstore Rekor / KMS), and — the hard line — **Phase 4–6 execution**
+(decide → apply → verify), which is where the architecture escalates beyond tool-less B2
+to gated agentic tool-calling. Full design, rationale, and roadmap: **`DESIGN.md`**.
 
 ## Appendix — provisioning the read-only role
 
@@ -554,6 +558,88 @@ It prints how many findings joined to the graph and their `exposure_path` /
 doesn't join, that finding **degrades gracefully** to v1's keyword exposure flag — the run
 never crashes and never blocks (same graceful-degrade contract as a down intel feed). When
 it looks right, your scheduled `run.py` picks up the graph facts automatically.
+
+## Appendix — enabling Stage 3 Trivy (image/package CVEs)
+
+**Optional and off by default.** Prowler is a CSPM (cloud-misconfiguration) scanner; its
+findings rarely reference a CVE, so the KEV/EPSS/NVD enrichment usually has nothing to
+score (a Prowler-only run logs `no CVE ids referenced by findings`). **Trivy** is a
+vulnerability scanner — every finding it emits *is* a CVE, with a package and a fixed
+version — so adding it lights up that enrichment on real data. Trivy findings flow through
+the **same** normalize → enrich (KEV/EPSS/NVD) → priority-floor → digest → signed-evidence
+→ dedup-ledger chain as Prowler findings, with no other change. It changes **nothing**
+about the security model: Trivy is an external **pinned CLI subprocess** (exactly like
+Prowler), its JSON is normalized deterministically, and the untrusted advisory text is
+fenced as DATA for the tool-less LLM — no tool is added. Design + validation: `DESIGN.md`
+§13.
+
+**Prerequisites (beyond the base ones):**
+- **Trivy** (Apache-2.0) on `PATH`, or run it from its official container
+  (`aquasec/trivy`) — the same "heavy external tool, isolated" pattern as Cartography.
+- Registry credentials for whatever images you scan (Trivy uses your existing Docker/registry
+  login). The **default path scans explicit image refs and needs no AWS permissions at all**.
+
+### 1. Install Trivy (or wrap the container)
+
+Install the binary (see the Trivy docs), or point `TRIVY_BIN` at a small wrapper that runs
+the container — mount `/tmp` so the collector's `--output` file is visible, and a cache dir
+so the vuln DB persists between runs:
+
+```bash
+cat > ~/.local/bin/trivy <<'SH'
+#!/bin/sh
+exec docker run --rm -v /tmp:/tmp -v "$HOME/.cache/trivy:/root/.cache/trivy" \
+  aquasec/trivy:latest "$@"
+SH
+chmod +x ~/.local/bin/trivy      # then set TRIVY_BIN=~/.local/bin/trivy (or leave it on PATH)
+```
+
+### 2. Choose what to scan
+
+In `config.toml` `[trivy]`, list explicit image references (the portable, zero-IAM path):
+
+```toml
+[trivy]
+version = "0."      # pin prefix; the collector refuses a Trivy whose version doesn't match
+targets = [
+  "ghcr.io/your-org/api:latest",
+  "123456789012.dkr.ecr.us-east-1.amazonaws.com/app:prod",
+]
+severities = ["critical", "high"]   # coarse pre-filter before the LLM triage
+```
+
+> **ECR auto-discovery** (`ecr_discovery = true`) is the one place the read-only surface
+> could widen: pulling ECR images needs the data-plane actions `ecr:GetAuthorizationToken`
+> / `ecr:BatchGetImage` / `ecr:GetDownloadUrlForLayer`, which `SecurityAudit` /
+> `ViewOnlyAccess` do **not** grant. It is off by default so the shipped role stays
+> unchanged; enable it only if you consciously accept those extra (still read-only) actions,
+> and add them to your `prowler-additions` policy. (Recognized in this release; explicit
+> `targets` is the supported path — see `DESIGN.md` §13.3.)
+
+### 3. Turn Trivy on
+
+As with the graph toggle, prefer **not** editing the shipped `enabled = false` if you track
+upstream: set the non-secret env var **`VULNTRIAGE_TRIVY_ENABLED=true`** in your deployment
+`.env` instead. It overrides the config default, so the committed file stays `false`
+(nothing to reconcile on `git pull`) — the same "deployment values live in `.env`" pattern
+as the channel id and the graph toggle.
+
+### 4. Verify (read-only, no posting, no ledger writes)
+
+Dry-run the collector against a captured Trivy report, or scan live and inspect the JSON —
+no Discord, no ledger writes:
+
+```bash
+# capture a report, then feed it in (no scan, no pull):
+trivy image --format json --output /tmp/trivy.json ghcr.io/your-org/api:latest
+python3 skills/aisec-vulntriage/collect.py collect \
+  --prowler-output /dev/stdin --trivy-output /tmp/trivy.json <<< '[]'
+```
+
+The output JSON's Trivy items carry `"source": "trivy"`, their CVE ids, and — once the KEV/
+EPSS feeds run — `kev` / `epss` maps. When it looks right, your scheduled `run.py` merges
+Trivy findings alongside Prowler's automatically. A failed image pull is logged and skipped
+(that image retries next run); it never sinks the run.
 
 ## Layout
 

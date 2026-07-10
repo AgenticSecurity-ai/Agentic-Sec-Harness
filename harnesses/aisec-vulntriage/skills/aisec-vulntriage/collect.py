@@ -3,12 +3,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """aisec-vulntriage collector — Phase 1-2 (collect + enrich), read-only.
 
-Stdlib only (requires Python 3.11+ for tomllib) plus the pinned Prowler CLI. No
-third-party Python deps, no secrets.
+Stdlib only (requires Python 3.11+ for tomllib) plus the pinned Prowler CLI and,
+optionally, the pinned Trivy CLI (stage 3, off by default). No third-party Python
+deps, no secrets.
 
 WHAT IT DOES (DESIGN.md §4 steps 1-2):
   1. Runs Prowler (read-only CSPM) over the configured AWS scope and reads its
-     JSON-OCSF output.
+     JSON-OCSF output. When [trivy].enabled (stage 3, DESIGN §13), also runs Trivy
+     over the configured images and merges its CVE findings.
   2. Normalizes each finding to a common schema, de-duplicates against the ledger,
      extracts any referenced CVE ids, and enriches them from free public intel
      feeds (CISA KEV membership, FIRST EPSS score, optionally NVD CVSS).
@@ -82,6 +84,9 @@ RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 # How long Prowler may run before we give up (a full-account scan can be slow;
 # scope it down in config.toml to stay well under this).
 PROWLER_TIMEOUT_SECONDS = 1800
+
+# How long a single Trivy image scan (pull + analyze) may run before we give up.
+TRIVY_TIMEOUT_SECONDS = 600
 
 CVE_RE = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
 
@@ -319,6 +324,218 @@ def _read_ocsf(path):
         data = json.load(f)
     # OCSF output is a JSON array of finding objects.
     return data if isinstance(data, list) else data.get("findings", [])
+
+
+# --------------------------------------------------------------------------- #
+# Trivy (stage 3, DESIGN §13) — image/package CVEs. Same trust posture as       #
+# Prowler/Cartography: an external, pinned, deterministic subprocess whose JSON  #
+# output is normalized to the common finding schema. Every Trivy finding IS a    #
+# CVE, so these light up the KEV/EPSS/NVD enrichment that CSPM-only Prowler       #
+# findings rarely trigger. Read-only and B2-preserving (§13.5).                  #
+# --------------------------------------------------------------------------- #
+def _verify_trivy_version(trivy_bin, pinned):
+    """Refuse to run if the installed Trivy doesn't match the pinned version prefix
+    (supply-chain hygiene — a surprise upgrade can change output shape). Empty
+    `pinned` skips the check. Returns the reported version string. Twin of
+    _verify_prowler_version."""
+    try:
+        out = subprocess.run([trivy_bin, "--version"], capture_output=True,
+                             text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise RuntimeError(f"cannot run '{trivy_bin} --version': {e}. "
+                           "Is Trivy installed and on PATH (or set TRIVY_BIN)?")
+    reported = (out.stdout + out.stderr).strip()
+    m = re.search(r"\d+\.\d+\.\d+", reported)
+    version = m.group(0) if m else reported
+    if pinned and not version.startswith(pinned):
+        raise RuntimeError(
+            f"Trivy version mismatch: installed '{version}' does not match pinned "
+            f"'{pinned}' in config.toml [trivy].version. Install the pinned version "
+            "or update the pin deliberately.")
+    return version
+
+
+def run_trivy_image(trivy_bin, image_ref):
+    """Scan one image ref with Trivy and return the parsed JSON report (a dict with
+    Results[]). Writes to a temp file that is cleaned up. We do NOT pass --exit-code,
+    so a clean exit is expected even when vulnerabilities are found; a non-zero exit
+    signals a real invocation/pull error, which we surface but only fail on if no
+    output was produced (mirrors run_prowler's exit handling)."""
+    outdir = tempfile.mkdtemp(prefix="trivy-vulntriage-")
+    outfile = os.path.join(outdir, "scan.json")
+    try:
+        cmd = [trivy_bin, "image", "--quiet", "--format", "json",
+               "--output", outfile, image_ref]
+        _log(f"[trivy] running: {' '.join(cmd)}")
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=TRIVY_TIMEOUT_SECONDS)
+        if proc.returncode != 0:
+            _log(f"[trivy] exit {proc.returncode} scanning {image_ref}; stderr tail: "
+                 f"{proc.stderr[-500:]}")
+        if not os.path.exists(outfile):
+            raise RuntimeError(
+                f"Trivy produced no output for {image_ref} (exit {proc.returncode})")
+        return _read_trivy_json(outfile)
+    finally:
+        shutil.rmtree(outdir, ignore_errors=True)
+
+
+def _read_trivy_json(path):
+    """Read a Trivy JSON report file. Returns the parsed object (dict, or a list of
+    reports if the captured file holds several)."""
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def normalize_trivy(vuln, image_ref, image_digest, target):
+    """Map one Trivy vulnerability (Results[].Vulnerabilities[]) to the SAME common
+    finding schema normalize() produces for Prowler, so every downstream step
+    (enrich / sort / floor / graph / digest / evidence / ledger) consumes Trivy
+    findings unchanged. Defensive .get chains: a shape drift degrades a field rather
+    than crashing the run. Returns None for a record with no usable id."""
+    vid = str(vuln.get("VulnerabilityID", "")).strip()
+    pkg = str(vuln.get("PkgName", "")).strip()
+    if not vid:
+        return None
+    # Stable dedup key: image (digest if known, else ref) + target + package + id, so
+    # the same CVE in the same package of the same image maps to one id across runs.
+    key_img = image_digest or image_ref
+    fid = f"trivy|{key_img}|{target}|{pkg}|{vid}"
+
+    severity = str(vuln.get("Severity", "")).strip().lower()
+    if severity not in VALID_SEVERITIES:
+        # Trivy emits UNKNOWN for unscored advisories; keep as '' (not dropped), like
+        # normalize() does for an unrecognized Prowler severity.
+        severity = ""
+
+    # Only CVE-shaped ids reach the intel feeds. Trivy also emits GHSA / DLA / etc.;
+    # those stay in the title (context for the LLM) but never go to KEV/EPSS/NVD.
+    cve_ids = sorted({m.group(0).upper() for m in CVE_RE.finditer(vid)})
+
+    installed = str(vuln.get("InstalledVersion", "")).strip()
+    fixed = str(vuln.get("FixedVersion", "")).strip()
+    title_txt = str(vuln.get("Title", "")).strip()
+    title = f"{pkg} {vid} — {title_txt}" if title_txt else f"{pkg} {vid}"
+    desc = str(vuln.get("Description", "")).strip()
+    primary = str(vuln.get("PrimaryURL", "")).strip()
+    refs = vuln.get("References") or []
+    risk = primary or (str(refs[0]) if refs else "")
+    remediation = (f"upgrade {pkg} {installed} → {fixed}" if fixed
+                   else f"no fixed version available for {pkg} {installed}".strip())
+
+    return {
+        "id": fid,
+        "source": "trivy",
+        "check_id": vid,
+        "title": " ".join(str(title).split()),
+        "severity": severity,
+        # Every Trivy vulnerability is an open finding; there is no PASS/FAIL axis.
+        "status": "FAIL",
+        "account": "",
+        "region": "",
+        "resource": image_ref,
+        "resource_type": "container_image",
+        "resource_name": image_ref,
+        # Untrusted publisher text (advisory description / refs) — DATA for the tool-
+        # less LLM only, fenced by the orchestrator. Never interpreted as a command.
+        "description": " ".join(desc.split()),
+        "risk": " ".join(str(risk).split()),
+        "remediation": " ".join(remediation.split()),
+        # The image itself has no network path; exposure/blast belong to the asset
+        # RUNNING the image (a stage-2 graph join deferred for Trivy — DESIGN §13.4).
+        "internet_exposed": False,
+        "cve_ids": cve_ids,
+        "kev": {},
+        "epss": {},
+        "nvd": {},
+        "graph": {},
+    }
+
+
+def _trivy_enabled(trivy_cfg):
+    """Whether Stage-3 Trivy collection is on. A deployment flips it with the
+    non-secret VULNTRIAGE_TRIVY_ENABLED env var (like the Discord channel id / the
+    graph toggle, convention #3) WITHOUT editing the shipped default, which stays
+    `[trivy].enabled=false` so self-hosters are unaffected. Env, when set non-empty,
+    wins; otherwise fall back to [trivy].enabled. Twin of _graph_enabled."""
+    env = os.environ.get("VULNTRIAGE_TRIVY_ENABLED")
+    if env is not None and env.strip() != "":
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    return bool(trivy_cfg.get("enabled", False))
+
+
+def _trivy_reports(cfg, trivy_bin, trivy_output):
+    """Yield (report_dict, image_ref) for each Trivy scan — from a captured file
+    (--trivy-output, a read-only dry run with no scan) or by scanning each configured
+    target image. Per-image scan failures are logged and skipped, never sinking the
+    run (a bad pull leaves that image unmarked to retry, like a failed post)."""
+    if trivy_output:
+        _log(f"[trivy] reading captured Trivy output {trivy_output} "
+             "(dry run; no scan)")
+        rep = _read_trivy_json(trivy_output)
+        reports = rep if isinstance(rep, list) else [rep]
+        for r in reports:
+            yield r, str(r.get("ArtifactName", "") or "captured-image")
+        return
+
+    tcfg = cfg.get("trivy", {})
+    if tcfg.get("ecr_discovery", False):
+        # The read-only-surface-widening opt-in (DESIGN §13.3). Recognized here so the
+        # config/IAM story holds, but ECR auto-enumeration is a follow-up; S3.1 scans
+        # explicit refs (the zero-IAM default path live verification exercises).
+        _log("[trivy] [trivy].ecr_discovery=true is recognized but ECR auto-discovery "
+             "is not wired in S3.1; configure explicit [trivy].targets (DESIGN §13.3).")
+    targets = tcfg.get("targets") or []
+    if not targets:
+        _log("[trivy] no [trivy].targets configured; nothing to scan")
+        return
+    version = _verify_trivy_version(trivy_bin, str(tcfg.get("version", "")).strip())
+    _log(f"[trivy] Trivy {version}; scanning {len(targets)} target image(s)")
+    for ref in targets:
+        try:
+            yield run_trivy_image(trivy_bin, ref), ref
+        except Exception as e:
+            _log(f"[trivy] scan of {ref} failed, skipping: {e}")
+
+
+def collect_trivy(cfg, trivy_bin, trivy_output=None):
+    """Return normalized Trivy findings (common schema), coarse-filtered by
+    [trivy].severities like the Prowler path. Empty list when Trivy is disabled and
+    no captured output was given. These findings all carry a CVE, so cmd_collect
+    merges them into the item list BEFORE enrich() to feed KEV/EPSS/NVD."""
+    tcfg = cfg.get("trivy", {})
+    if not (trivy_output or _trivy_enabled(tcfg)):
+        return []
+    wanted = [s.lower() for s in tcfg.get("severities", [])]
+    items = []
+    # A Trivy SETUP failure (binary missing / version-pin mismatch, raised by
+    # _verify_trivy_version) must degrade to Prowler-only, not sink the whole run —
+    # Trivy is an off-by-default add-on with the same graceful-degrade contract as a
+    # down intel feed or an unreachable graph. (Per-image scan failures are already
+    # caught inside _trivy_reports; this catches the one-time setup error before the
+    # loop yields anything.)
+    try:
+        for rep, ref in _trivy_reports(cfg, trivy_bin, trivy_output):
+            meta = rep.get("Metadata") or {}
+            digest = meta.get("ImageID") or meta.get("RepoDigests") or ""
+            if isinstance(digest, list):
+                digest = digest[0] if digest else ""
+            for result in rep.get("Results") or []:
+                target = str(result.get("Target", ""))
+                for vuln in result.get("Vulnerabilities") or []:
+                    it = normalize_trivy(vuln, ref, str(digest), target)
+                    if it is None:
+                        continue
+                    # Keep unknown ('') severity rather than silently dropping it.
+                    if wanted and it["severity"] and it["severity"] not in wanted:
+                        continue
+                    items.append(it)
+    except (RuntimeError, OSError) as e:
+        _log(f"[trivy] setup failed ({e}); degrading to Prowler-only "
+             "(no Trivy findings this run)")
+        return []
+    _log(f"[trivy] {len(items)} finding(s) after severity filter")
+    return items
 
 
 # --------------------------------------------------------------------------- #
@@ -755,7 +972,7 @@ def _status_allowed(rec, cfg):
 
 
 def cmd_collect(cfg, seen_path, prowler_bin, aws_profile, prowler_output,
-                include_seen=False):
+                include_seen=False, trivy_bin="trivy", trivy_output=None):
     seen = load_seen(seen_path)
 
     if prowler_output:
@@ -775,6 +992,15 @@ def cmd_collect(cfg, seen_path, prowler_bin, aws_profile, prowler_output,
         if item is None or not _severity_allowed(item, cfg):
             continue
         by_id.setdefault(item["id"], item)  # first record wins on dup id
+    # Stage 3 (DESIGN §13): merge Trivy CVE findings into the same item list BEFORE
+    # enrich(), so their CVEs feed KEV/EPSS/NVD. No-op when Trivy is disabled. Trivy
+    # ids are namespaced ("trivy|…") so they never collide with Prowler finding uids.
+    # A `--prowler-output` replay is a documented OFFLINE dry run ("no AWS calls"), so
+    # it must NOT trigger live Trivy image pulls either — only include Trivy findings
+    # from a captured `--trivy-output`. Otherwise (live Prowler run) collect Trivy live.
+    if not (prowler_output and not trivy_output):
+        for item in collect_trivy(cfg, trivy_bin, trivy_output):
+            by_id.setdefault(item["id"], item)
     items = list(by_id.values())
     _log(f"[collect] {len(items)} finding(s) after status/severity filter "
          f"(ledger has {len(seen)} seen)")
@@ -915,6 +1141,11 @@ def main():
         "--include-seen", action="store_true",
         help="Emit EVERY currently-open finding (each tagged \"seen\"), not just "
              "unseen ones, for the weekly full re-digest. Does not touch the ledger.")
+    p_collect.add_argument(
+        "--trivy-output", default=None,
+        help="Read this captured Trivy JSON report file instead of scanning images "
+             "(read-only dry run; no pull, no AWS). Merges its CVE findings alongside "
+             "Prowler's. See DESIGN §13.")
     p_mark = sub.add_parser("mark")
     p_mark.add_argument("ids", nargs="+")
     sub.add_parser("seen-count")
@@ -931,10 +1162,12 @@ def main():
     if args.cmd == "collect":
         cfg = load_config(args.config)
         prowler_bin = os.environ.get("PROWLER_BIN", "prowler")
+        trivy_bin = os.environ.get("TRIVY_BIN", "trivy")
         aws_profile = (os.environ.get("VULNTRIAGE_AWS_PROFILE")
                        or cfg.get("aws", {}).get("profile", "") or "")
         cmd_collect(cfg, args.state, prowler_bin, aws_profile, args.prowler_output,
-                    include_seen=args.include_seen)
+                    include_seen=args.include_seen, trivy_bin=trivy_bin,
+                    trivy_output=args.trivy_output)
     elif args.cmd == "mark":
         cmd_mark(args.ids, args.state)
     elif args.cmd == "seen-count":
