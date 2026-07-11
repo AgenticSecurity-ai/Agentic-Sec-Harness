@@ -1040,6 +1040,23 @@ w/CVE (generic label + NVD link), and absent source w/o CVE (generic label, no l
 Remaining Trivy follow-ups: shared `make_finding()` schema constructor (⑨) and
 robustness (⑦⑧, list-safe / empty-file guards).
 
+**Shared `make_finding()` schema constructor (2026-07-11, fixed).** The ⑨ follow-up
+above is now resolved. `normalize_trivy` and Prowler's `normalize` each hand-built the
+same 20-key common finding schema as a separate dict literal — twin dicts that both had
+to be edited in lockstep whenever the schema grew (a new intel/graph slot, a renamed
+field). Fix: a keyword-only `make_finding(...)` constructor centralizes the field set
+and the always-`{}` intel/graph slots (`kev`/`epss`/`nvd`/`graph`), plus the
+whitespace-collapse (`" ".join(str(x).split())`) applied to the untrusted free-text
+fields (`title`/`description`/`risk`/`remediation`). Each normalizer keeps ALL of its
+source-specific extraction (id computation, CVE regex, exposure heuristic) and just
+passes the results — so the deliberate independence of the two collectors' *logic*
+(their twin was intentional, not accidental duplication) is preserved; only the shared
+*shape* is unified. Verified byte-identical to the pre-change `HEAD` by loading both
+module versions and diffing `normalize`/`normalize_trivy` output over 8 Trivy + 2 Prowler
+fixtures (whitespace-heavy text, GHSA-only ids, UNKNOWN severity, missing fields, digest
+vs `:latest` refs) — equal dicts AND equal key order. Remaining Trivy follow-ups:
+robustness (⑦⑧, list-safe / empty-file guards).
+
 ### 13.8 Sub-milestones (this PR = S3.0–S3.3)
 
 - **S3.0 Design annex** — this §13.
