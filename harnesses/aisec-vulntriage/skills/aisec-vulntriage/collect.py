@@ -382,9 +382,21 @@ def run_trivy_image(trivy_bin, image_ref):
 
 def _read_trivy_json(path):
     """Read a Trivy JSON report file. Returns the parsed object (dict, or a list of
-    reports if the captured file holds several)."""
+    reports if the captured file holds several). An empty or truncated file (Trivy
+    killed mid-write, or a hand-edited capture) and invalid JSON are both raised as
+    RuntimeError — NOT the bare json.JSONDecodeError (a ValueError). That distinction
+    matters: collect_trivy's degrade-to-Prowler guard catches (RuntimeError, OSError)
+    but deliberately not ValueError (which the ecr_discovery abort uses), so a bad
+    report file must surface as RuntimeError to degrade cleanly instead of aborting
+    the whole run with a JSON traceback."""
     with open(path, encoding="utf-8") as f:
-        return json.load(f)
+        raw = f.read()
+    if not raw.strip():
+        raise RuntimeError(f"Trivy output file {path} is empty (no scan result)")
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Trivy output file {path} is not valid JSON: {e}")
 
 
 # --------------------------------------------------------------------------- #
@@ -508,6 +520,25 @@ def _trivy_enabled(trivy_cfg):
     return bool(trivy_cfg.get("enabled", False))
 
 
+def _coerce_reports(rep):
+    """Coerce a parsed Trivy report into a list of dict reports. A Trivy JSON file can
+    hold a single report (dict) or several (a top-level list); a hand-edited capture
+    can also carry non-object junk. Return only the dict elements, logging and dropping
+    anything else, so a shape drift degrades a field rather than crashing the scan loop
+    with AttributeError on `rep.get(...)` (which would escape the degrade-to-Prowler
+    guard and sink the whole run). Used by BOTH the live-scan and captured paths so the
+    list case is handled symmetrically."""
+    candidates = rep if isinstance(rep, list) else [rep]
+    reports = []
+    for r in candidates:
+        if isinstance(r, dict):
+            reports.append(r)
+        else:
+            _log(f"[trivy] skipping non-object report element "
+                 f"(type {type(r).__name__})")
+    return reports
+
+
 def _trivy_reports(cfg, trivy_bin, trivy_output):
     """Yield (report_dict, image_ref) for each Trivy scan — from a captured file
     (--trivy-output, a read-only dry run with no scan) or by scanning each configured
@@ -516,9 +547,7 @@ def _trivy_reports(cfg, trivy_bin, trivy_output):
     if trivy_output:
         _log(f"[trivy] reading captured Trivy output {trivy_output} "
              "(dry run; no scan)")
-        rep = _read_trivy_json(trivy_output)
-        reports = rep if isinstance(rep, list) else [rep]
-        for r in reports:
+        for r in _coerce_reports(_read_trivy_json(trivy_output)):
             yield r, str(r.get("ArtifactName", "") or "captured-image")
         return
 
@@ -531,9 +560,12 @@ def _trivy_reports(cfg, trivy_bin, trivy_output):
     _log(f"[trivy] Trivy {version}; scanning {len(targets)} target image(s)")
     for ref in targets:
         try:
-            yield run_trivy_image(trivy_bin, ref), ref
+            rep = run_trivy_image(trivy_bin, ref)
         except Exception as e:
             _log(f"[trivy] scan of {ref} failed, skipping: {e}")
+            continue
+        for r in _coerce_reports(rep):
+            yield r, ref
 
 
 def collect_trivy(cfg, trivy_bin, trivy_output=None):
@@ -584,8 +616,12 @@ def collect_trivy(cfg, trivy_bin, trivy_output=None):
                 digest = digest[0] if digest else ""
             _log(f"[trivy] scanned {ref} (digest {digest or 'unknown'})")
             for result in rep.get("Results") or []:
+                if not isinstance(result, dict):
+                    continue
                 target = str(result.get("Target", ""))
                 for vuln in result.get("Vulnerabilities") or []:
+                    if not isinstance(vuln, dict):
+                        continue
                     it = normalize_trivy(vuln, ref, target)
                     if it is None:
                         continue
