@@ -1057,6 +1057,33 @@ fixtures (whitespace-heavy text, GHSA-only ids, UNKNOWN severity, missing fields
 vs `:latest` refs) — equal dicts AND equal key order. Remaining Trivy follow-ups:
 robustness (⑦⑧, list-safe / empty-file guards).
 
+**Robustness — list-safe / empty-file guards (2026-07-11, fixed).** The ⑦⑧ follow-ups
+above are now resolved — the last of the Trivy review items. (⑧) `_read_trivy_json`
+did a bare `json.load`, so an empty/truncated report file (Trivy killed mid-write, a
+hand-edited capture) or invalid JSON raised `json.JSONDecodeError` — a **`ValueError`**.
+On the captured `--trivy-output` path that error is not caught by `collect_trivy`'s
+`except (RuntimeError, OSError)` degrade guard (which deliberately excludes `ValueError`,
+reserved for the ⑥ `ecr_discovery` abort), so a bad report file aborted the *entire* run
+with a traceback instead of degrading. Fix: `_read_trivy_json` now reads the file, raises
+`RuntimeError` on empty/whitespace-only content, and re-raises `JSONDecodeError` as
+`RuntimeError` — so both the live per-image loop (broad `except Exception` → skip that
+image) and the captured path (`collect_trivy`'s guard → degrade to Prowler-only) handle
+it cleanly with a clear message. (⑦) `_read_trivy_json` can return a **list** (a capture
+holding several reports), but only the captured path unwrapped it; the live-scan path
+yielded `run_trivy_image(...)` raw, so a list-shaped report hit `rep.get("Metadata")` →
+`AttributeError`, which escapes the degrade guard and sinks the run. Fix: a shared
+`_coerce_reports(rep)` helper coerces dict-or-list into a list of **dict** reports
+(logging and dropping non-object junk), used by BOTH paths; plus `isinstance(..., dict)`
+guards on `Results[]` / `Vulnerabilities[]` elements so a shape drift degrades a field
+rather than crashing — the same "defensive `.get` chains" philosophy `normalize_trivy`
+already documents. Distribution default stays off, so live is untouched. Verified offline
+(15/15): empty/whitespace/malformed files raise `RuntimeError` and degrade `collect_trivy`
+to `[]`; a normal single-dict capture still yields the finding byte-identically
+(regression); a list capture yields both findings; non-dict list/`Results`/`Vulnerabilities`
+elements are skipped while valid siblings survive; and a monkeypatched live scan returning
+a list report yields both findings without crashing. **All ten Trivy review items
+(①–⑩) are now resolved.**
+
 ### 13.8 Sub-milestones (this PR = S3.0–S3.3)
 
 - **S3.0 Design annex** — this §13.
