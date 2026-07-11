@@ -167,8 +167,10 @@ targets = []
 # ecr:GetAuthorizationToken / BatchGetImage / GetDownloadUrlForLayer, which SecurityAudit/
 # ViewOnlyAccess do NOT grant. OFF by default so the shipped role stays unchanged; a
 # deployer who enables it consciously accepts those extra (still read-only) actions. See
-# DESIGN §13.3 and the README appendix. (Recognized in S3.1; enumeration is a follow-up —
-# for now configure explicit `targets`.)
+# DESIGN §13.3 and the README appendix. NOTE: enumeration is not implemented yet — setting
+# this true makes the collector FAIL LOUD (aborts the run with an error) rather than
+# silently scanning nothing, so an unscanned registry can't be mistaken for clean. For now
+# configure explicit `targets` and leave this false.
 ecr_discovery = false
 
 # Coarse severity pre-filter for Trivy findings (before the LLM triage), same idea as
