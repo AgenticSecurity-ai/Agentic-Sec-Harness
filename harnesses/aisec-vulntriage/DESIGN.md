@@ -982,6 +982,16 @@ rebuilds, `[trivy].severities` falling back to `[prowler].severities` when unset
 `ecr_discovery` failing loud instead of silently scanning nothing, and a shared
 `make_finding()` schema constructor.
 
+**Severities inheritance (2026-07-11, fixed).** The second follow-up above is now
+resolved. `collect_trivy` read `[trivy].severities` in isolation, so an unset/empty key
+meant "keep all" — asymmetric with the Prowler path, where `[prowler].severities`
+governs. Fix: when `[trivy].severities` is unset/empty, inherit `[prowler].severities`
+(`sev = tcfg.get("severities") or cfg["prowler"].get("severities", [])`); an explicit
+non-empty `[trivy].severities` still wins, and if both are empty the existing `if wanted`
+guard keeps everything. Verified offline (6/6): `[trivy].severities` unset +
+`[prowler].severities=["critical"]` drops a HIGH finding; an explicit `[trivy]` list
+overrides Prowler; both-empty keeps all.
+
 **Dedup-id stability (2026-07-11, fixed).** The first follow-up above is now resolved.
 `normalize_trivy` keyed the finding id on `image_digest or image_ref`, where
 `image_digest = Metadata.ImageID`. `ImageID` is the local image config hash, which

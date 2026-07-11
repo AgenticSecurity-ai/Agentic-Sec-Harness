@@ -172,5 +172,7 @@ targets = []
 ecr_discovery = false
 
 # Coarse severity pre-filter for Trivy findings (before the LLM triage), same idea as
-# [prowler].severities. Empty = keep all. Unknown/unscored ('') is always kept.
+# [prowler].severities. If unset/empty, inherits [prowler].severities (so Trivy isn't
+# silently unfiltered while Prowler is filtered); if both are empty, keeps all.
+# Unknown/unscored ('') is always kept.
 severities = ["critical", "high", "medium"]
