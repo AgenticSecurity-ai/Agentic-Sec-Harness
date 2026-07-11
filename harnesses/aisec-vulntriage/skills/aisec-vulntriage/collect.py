@@ -513,7 +513,12 @@ def collect_trivy(cfg, trivy_bin, trivy_output=None):
     tcfg = cfg.get("trivy", {})
     if not (trivy_output or _trivy_enabled(tcfg)):
         return []
-    wanted = [s.lower() for s in tcfg.get("severities", [])]
+    # Coarse severity pre-filter. An explicit [trivy].severities wins; when it is
+    # unset/empty we inherit [prowler].severities so Trivy isn't silently unfiltered
+    # while Prowler is filtered (the two collectors' coarse gate stays symmetric). If
+    # both are empty, keep everything (the `if wanted` guard below).
+    sev = tcfg.get("severities") or cfg.get("prowler", {}).get("severities", [])
+    wanted = [s.lower() for s in sev]
     items = []
     # A Trivy SETUP failure (binary missing / version-pin mismatch, raised by
     # _verify_trivy_version) must degrade to Prowler-only, not sink the whole run —
