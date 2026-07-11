@@ -902,7 +902,7 @@ the **existing common finding schema** (§ `normalize`):
 | common schema field | Trivy source |
 |---|---|
 | `source` | `"trivy"` (Prowler findings are `"prowler"`) |
-| `id` (dedup key) | `trivy\|<image-digest-or-ref>\|<Target>\|<PkgName>\|<VulnerabilityID>` — stable across runs for the same package+CVE+image |
+| `id` (dedup key) | `trivy\|<configured-image-ref>\|<Target>\|<PkgName>\|<VulnerabilityID>` — keyed on the **configured ref** (e.g. `app:latest`), **not** the image digest, so the same package+CVE maps to one id across `:latest` rebuilds (idempotent ledger, CLAUDE.md #5). The digest (`Metadata.ImageID`) is logged for provenance but excluded from the key — see the dedup-stability note in §13.7. Trade-off: a CVE fixed then re-introduced under the same ref is not re-notified daily (mirrors Prowler's resolved→recurred constraint), but the weekly full re-digest (S1.7) re-surfaces still-open findings. |
 | `cve_ids` | `[VulnerabilityID]` when it matches `CVE_RE` (Trivy also emits non-CVE advisory ids — GHSA/DLA; keep them in `title`, only CVE-shaped ids go in `cve_ids` so they reach `enrich()`) |
 | `severity` | `Severity` lowercased → existing `VALID_SEVERITIES` (`critical/high/medium/low`) |
 | `title` | `"<PkgName> <VulnerabilityID> — <Title>"` |
@@ -981,6 +981,19 @@ Deferred to follow-ups (logged, not fixed here): dedup-id stability across `:lat
 rebuilds, `[trivy].severities` falling back to `[prowler].severities` when unset,
 `ecr_discovery` failing loud instead of silently scanning nothing, and a shared
 `make_finding()` schema constructor.
+
+**Dedup-id stability (2026-07-11, fixed).** The first follow-up above is now resolved.
+`normalize_trivy` keyed the finding id on `image_digest or image_ref`, where
+`image_digest = Metadata.ImageID`. `ImageID` is the local image config hash, which
+changes on every `:latest` rebuild — so an unchanged CVE in an unchanged package
+re-minted its id and re-posted on each rebuild, violating the idempotent ledger
+(CLAUDE.md #5). Fix: key on the **configured image ref only** (`trivy|<ref>|<Target>|
+<PkgName>|<VulnerabilityID>`); the digest is computed once per report and logged for
+provenance (`[trivy] scanned <ref> (digest <digest>)`) but never enters the key. The
+`image_digest` parameter was dropped from `normalize_trivy`. Verified offline: the same
+synthetic CVE scanned under two different `Metadata.ImageID` values (same ref) yields
+**0 new findings on the second run** (idempotent), while changing the *ref* still mints a
+new id. Accepted trade-off is documented in the §13.4 schema-table row above.
 
 ### 13.8 Sub-milestones (this PR = S3.0–S3.3)
 

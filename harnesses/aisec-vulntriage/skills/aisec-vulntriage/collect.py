@@ -387,7 +387,7 @@ def _read_trivy_json(path):
         return json.load(f)
 
 
-def normalize_trivy(vuln, image_ref, image_digest, target):
+def normalize_trivy(vuln, image_ref, target):
     """Map one Trivy vulnerability (Results[].Vulnerabilities[]) to the SAME common
     finding schema normalize() produces for Prowler, so every downstream step
     (enrich / sort / floor / graph / digest / evidence / ledger) consumes Trivy
@@ -397,10 +397,17 @@ def normalize_trivy(vuln, image_ref, image_digest, target):
     pkg = str(vuln.get("PkgName", "")).strip()
     if not vid:
         return None
-    # Stable dedup key: image (digest if known, else ref) + target + package + id, so
-    # the same CVE in the same package of the same image maps to one id across runs.
-    key_img = image_digest or image_ref
-    fid = f"trivy|{key_img}|{target}|{pkg}|{vid}"
+    # Stable dedup key: the CONFIGURED image ref (a floating tag like `app:latest` or a
+    # digest-pinned ref) + target + package + id. We deliberately DO NOT key on the
+    # image *digest* (Metadata.ImageID): a `:latest` rebuild mints a new digest even
+    # when the same package still carries the same CVE, which would re-mint the id and
+    # re-post an unchanged finding every rebuild — a violation of the idempotent-ledger
+    # invariant (CLAUDE.md #5). Keying on the ref collapses those to one finding. The
+    # trade-off (a CVE that is fixed then re-introduced under the same ref is not re-
+    # notified on a daily run) mirrors Prowler's resolved→recurred constraint and is
+    # covered by the weekly full re-digest (S1.7), which re-surfaces still-open findings.
+    # The exact scanned digest is not lost — it is logged for provenance in collect_trivy.
+    fid = f"trivy|{image_ref}|{target}|{pkg}|{vid}"
 
     severity = str(vuln.get("Severity", "")).strip().lower()
     if severity not in VALID_SEVERITIES:
@@ -517,13 +524,18 @@ def collect_trivy(cfg, trivy_bin, trivy_output=None):
     try:
         for rep, ref in _trivy_reports(cfg, trivy_bin, trivy_output):
             meta = rep.get("Metadata") or {}
+            # Provenance only — the exact build assessed. NOT part of the dedup key
+            # (see normalize_trivy): keying on the digest would re-post every unchanged
+            # CVE on each `:latest` rebuild. Logged so the audit trail records which
+            # image build produced these findings.
             digest = meta.get("ImageID") or meta.get("RepoDigests") or ""
             if isinstance(digest, list):
                 digest = digest[0] if digest else ""
+            _log(f"[trivy] scanned {ref} (digest {digest or 'unknown'})")
             for result in rep.get("Results") or []:
                 target = str(result.get("Target", ""))
                 for vuln in result.get("Vulnerabilities") or []:
-                    it = normalize_trivy(vuln, ref, str(digest), target)
+                    it = normalize_trivy(vuln, ref, target)
                     if it is None:
                         continue
                     # Keep unknown ('') severity rather than silently dropping it.
