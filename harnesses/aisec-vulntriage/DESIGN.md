@@ -1005,6 +1005,23 @@ synthetic CVE scanned under two different `Metadata.ImageID` values (same ref) y
 **0 new findings on the second run** (idempotent), while changing the *ref* still mints a
 new id. Accepted trade-off is documented in the §13.4 schema-table row above.
 
+**ecr_discovery fail-loud (2026-07-11, fixed).** The third follow-up above is now
+resolved. `ecr_discovery=true` is an unimplemented opt-in (§13.3: S3.1 only scans explicit
+`[trivy].targets`, ECR repos are never enumerated). The collector merely *logged* a note
+and proceeded, so a deployer who flipped it — believing their registry was being covered —
+silently scanned nothing, letting an unscanned ECR masquerade as "0 findings = clean."
+Fix: `collect_trivy` now raises a `ValueError` when `ecr_discovery=true` on a live scan
+(skipped for a `--trivy-output` dry run, which reads a captured report and never
+enumerates). This is an operator **config** mistake, not a transient setup failure, so it
+is raised *before* the degrade-to-Prowler guard and — being a `ValueError`, which that
+guard's `(RuntimeError, OSError)` does not catch — propagates up to abort the run;
+`main()` turns it into a clean `[error] …` line (non-zero exit → `run.py` stops the run).
+The `config.toml` comment now states the flag fails loud. Verified offline (5/5): live
+scan raises with the right message; `--trivy-output` dry run does not; `ecr_discovery=false`
+is unaffected; and `cmd_collect` propagates the error rather than swallowing it into the
+Prowler-only degrade path. Remaining Trivy follow-ups: shared `make_finding()` schema
+constructor (⑨) and source→label/link map (⑩), plus robustness (⑦⑧).
+
 ### 13.8 Sub-milestones (this PR = S3.0–S3.3)
 
 - **S3.0 Design annex** — this §13.

@@ -486,12 +486,6 @@ def _trivy_reports(cfg, trivy_bin, trivy_output):
         return
 
     tcfg = cfg.get("trivy", {})
-    if tcfg.get("ecr_discovery", False):
-        # The read-only-surface-widening opt-in (DESIGN §13.3). Recognized here so the
-        # config/IAM story holds, but ECR auto-enumeration is a follow-up; S3.1 scans
-        # explicit refs (the zero-IAM default path live verification exercises).
-        _log("[trivy] [trivy].ecr_discovery=true is recognized but ECR auto-discovery "
-             "is not wired in S3.1; configure explicit [trivy].targets (DESIGN §13.3).")
     targets = tcfg.get("targets") or []
     if not targets:
         _log("[trivy] no [trivy].targets configured; nothing to scan")
@@ -513,6 +507,21 @@ def collect_trivy(cfg, trivy_bin, trivy_output=None):
     tcfg = cfg.get("trivy", {})
     if not (trivy_output or _trivy_enabled(tcfg)):
         return []
+    # ecr_discovery is an unimplemented opt-in (DESIGN §13.3): S3.1 only scans the
+    # explicit [trivy].targets, so ECR repos are never enumerated. Fail LOUD rather than
+    # silently scanning nothing — a deployer who flips it believes their registry is being
+    # covered, and letting the run proceed would let an unscanned ECR masquerade as
+    # "0 findings = clean". This is an operator config mistake, not a transient setup
+    # failure, so it is raised BEFORE the degrade-to-Prowler guard below and propagates up
+    # to abort the run (ValueError, which that guard's RuntimeError/OSError does not catch;
+    # main() turns it into a clean [error] line). A --trivy-output dry run reads a captured
+    # report and never enumerates, so the check is skipped there.
+    if not trivy_output and tcfg.get("ecr_discovery", False):
+        raise ValueError(
+            "[trivy].ecr_discovery=true is not implemented (DESIGN §13.3): no ECR "
+            "repositories are enumerated, so the run would scan nothing and could hide an "
+            "unscanned registry as clean. Set explicit [trivy].targets and unset "
+            "ecr_discovery, or disable it.")
     # Coarse severity pre-filter. An explicit [trivy].severities wins; when it is
     # unset/empty we inherit [prowler].severities so Trivy isn't silently unfiltered
     # while Prowler is filtered (the two collectors' coarse gate stays symmetric). If
@@ -1182,9 +1191,15 @@ def main():
         trivy_bin = os.environ.get("TRIVY_BIN", "trivy")
         aws_profile = (os.environ.get("VULNTRIAGE_AWS_PROFILE")
                        or cfg.get("aws", {}).get("profile", "") or "")
-        cmd_collect(cfg, args.state, prowler_bin, aws_profile, args.prowler_output,
-                    include_seen=args.include_seen, trivy_bin=trivy_bin,
-                    trivy_output=args.trivy_output)
+        try:
+            cmd_collect(cfg, args.state, prowler_bin, aws_profile, args.prowler_output,
+                        include_seen=args.include_seen, trivy_bin=trivy_bin,
+                        trivy_output=args.trivy_output)
+        except ValueError as exc:
+            # A collector config error (e.g. the ecr_discovery fail-loud) — abort with a
+            # clean operator-facing message and a non-zero exit so run.py stops the run,
+            # instead of dumping a traceback.
+            sys.exit(f"[error] {exc}")
     elif args.cmd == "mark":
         cmd_mark(args.ids, args.state)
     elif args.cmd == "seen-count":
