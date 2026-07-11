@@ -387,6 +387,51 @@ def _read_trivy_json(path):
         return json.load(f)
 
 
+# --------------------------------------------------------------------------- #
+# common finding schema — the ONE shape every collector emits and every         #
+# downstream step (enrich / sort / floor / graph / digest / evidence / ledger)  #
+# consumes. Both normalizers (normalize_trivy below, normalize for Prowler)      #
+# build it through make_finding so the field set + the stable intel/graph slots  #
+# live in one place; each normalizer keeps only its source-specific extraction   #
+# (id, cve ids, exposure heuristic) and passes the results here.                 #
+# --------------------------------------------------------------------------- #
+def make_finding(*, fid, source, check_id, title, severity, status,
+                 account="", region="", resource="", resource_type="",
+                 resource_name="", description="", risk="", remediation="",
+                 internet_exposed=False, cve_ids=None):
+    """Build one common-schema finding dict. Centralizes the field set and the
+    intel/graph slots (kev/epss/nvd/graph always start as {}, filled in later by
+    enrich()/graph_enrich()) so a schema change is made HERE, not duplicated per
+    collector. The free-text fields (title/description/risk/remediation) carry
+    UNTRUSTED publisher/environment text — DATA for the tool-less LLM only, fenced
+    by the orchestrator, never interpreted as a command — and are whitespace-
+    collapsed exactly as each normalizer did inline."""
+    def _ws(s):
+        return " ".join(str(s).split())
+    return {
+        "id": fid,
+        "source": source,
+        "check_id": check_id,
+        "title": _ws(title),
+        "severity": severity,
+        "status": status,
+        "account": account,
+        "region": region,
+        "resource": resource,
+        "resource_type": resource_type,
+        "resource_name": resource_name,
+        "description": _ws(description),
+        "risk": _ws(risk),
+        "remediation": _ws(remediation),
+        "internet_exposed": internet_exposed,
+        "cve_ids": cve_ids or [],
+        "kev": {},
+        "epss": {},
+        "nvd": {},
+        "graph": {},
+    }
+
+
 def normalize_trivy(vuln, image_ref, target):
     """Map one Trivy vulnerability (Results[].Vulnerabilities[]) to the SAME common
     finding schema normalize() produces for Prowler, so every downstream step
@@ -430,33 +475,25 @@ def normalize_trivy(vuln, image_ref, target):
     remediation = (f"upgrade {pkg} {installed} → {fixed}" if fixed
                    else f"no fixed version available for {pkg} {installed}".strip())
 
-    return {
-        "id": fid,
-        "source": "trivy",
-        "check_id": vid,
-        "title": " ".join(str(title).split()),
-        "severity": severity,
+    return make_finding(
+        fid=fid,
+        source="trivy",
+        check_id=vid,
+        title=title,
+        severity=severity,
         # Every Trivy vulnerability is an open finding; there is no PASS/FAIL axis.
-        "status": "FAIL",
-        "account": "",
-        "region": "",
-        "resource": image_ref,
-        "resource_type": "container_image",
-        "resource_name": image_ref,
-        # Untrusted publisher text (advisory description / refs) — DATA for the tool-
-        # less LLM only, fenced by the orchestrator. Never interpreted as a command.
-        "description": " ".join(desc.split()),
-        "risk": " ".join(str(risk).split()),
-        "remediation": " ".join(remediation.split()),
+        status="FAIL",
+        resource=image_ref,
+        resource_type="container_image",
+        resource_name=image_ref,
+        description=desc,
+        risk=risk,
+        remediation=remediation,
         # The image itself has no network path; exposure/blast belong to the asset
         # RUNNING the image (a stage-2 graph join deferred for Trivy — DESIGN §13.4).
-        "internet_exposed": False,
-        "cve_ids": cve_ids,
-        "kev": {},
-        "epss": {},
-        "nvd": {},
-        "graph": {},
-    }
+        internet_exposed=False,
+        cve_ids=cve_ids,
+    )
 
 
 def _trivy_enabled(trivy_cfg):
@@ -610,34 +647,24 @@ def normalize(rec):
     exposure_probe = f"{check_id} {title}".lower()
     internet_exposed = any(h in exposure_probe for h in EXPOSURE_HINTS)
 
-    return {
-        "id": fid,
-        "source": "prowler",
-        "check_id": check_id,
-        "title": " ".join(str(title).split()),
-        "severity": severity,
-        "status": rec.get("status_code", ""),
-        "account": account,
-        "region": res.get("region") or cloud.get("region", ""),
-        "resource": res.get("uid", ""),
-        "resource_type": res.get("type", ""),
-        "resource_name": res.get("name", ""),
-        # Untrusted publisher/environment text — for the tool-less LLM only, fenced
-        # as DATA by the orchestrator. Never interpreted as a command here.
-        "description": " ".join(str(desc).split()),
-        "risk": " ".join(str(risk).split()),
-        "remediation": " ".join(str(remediation_text).split()),
-        "internet_exposed": internet_exposed,
-        "cve_ids": cve_ids,
-        # Intel enrichment filled in by enrich(); defaults keep the schema stable
-        # even when a finding carries no CVE.
-        "kev": {},
-        "epss": {},
-        "nvd": {},
-        # Cartography graph facts filled in by graph_enrich() when [graph].enabled
-        # (stage 2.3). Empty {} means the graph was not consulted (v1 default / degrade).
-        "graph": {},
-    }
+    return make_finding(
+        fid=fid,
+        source="prowler",
+        check_id=check_id,
+        title=title,
+        severity=severity,
+        status=rec.get("status_code", ""),
+        account=account,
+        region=res.get("region") or cloud.get("region", ""),
+        resource=res.get("uid", ""),
+        resource_type=res.get("type", ""),
+        resource_name=res.get("name", ""),
+        description=desc,
+        risk=risk,
+        remediation=remediation_text,
+        internet_exposed=internet_exposed,
+        cve_ids=cve_ids,
+    )
 
 
 # --------------------------------------------------------------------------- #
