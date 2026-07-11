@@ -343,6 +343,32 @@ def build_rationale(item, verdict, priority):
     return rationale
 
 
+# Per-collector post display: source id -> (label, link_builder). The label keeps
+# provenance honest (a Trivy CVE must not read as a Prowler check — DESIGN §13.4);
+# the link_builder turns TRUSTED collector metadata into a reference URL (the LLM
+# never echoes ids/urls). Add a new collector (e.g. DefectDojo) with one row here —
+# format_post needs no edit. An unknown/absent source falls back to _DEFAULT_SOURCE.
+def _nvd_link(item):
+    """NVD detail page for the finding's first CVE, or None if it carries none."""
+    cves = item.get("cve_ids")
+    return f"https://nvd.nist.gov/vuln/detail/{cves[0]}" if cves else None
+
+
+SOURCES = {
+    "trivy": ("Trivy", _nvd_link),
+    "prowler": ("Prowler", _nvd_link),
+}
+_DEFAULT_SOURCE = ("source", _nvd_link)
+
+
+def source_display(item):
+    """(label, link) for a finding, resolved from its TRUSTED collector `source`.
+    An unknown/absent source falls back to a safe generic label + CVE→NVD link so a
+    newly added collector still posts sensibly before it gets its own SOURCES row."""
+    label, link_builder = SOURCES.get(item.get("source"), _DEFAULT_SOURCE)
+    return label, link_builder(item)
+
+
 def format_post(item, priority, rationale):
     asset = item.get("resource_name") or item.get("resource") or item.get("check_id")
     ref = item["cve_ids"][0] if item.get("cve_ids") else item["check_id"]
@@ -353,13 +379,12 @@ def format_post(item, priority, rationale):
     epss = f"{rationale['epss']:.2f}" if item.get("epss") else "n/a"
     exposure = "internet" if rationale["internet_exposed"] else "internal"
     # Source line from TRUSTED collector data only (the LLM never echoes ids/urls).
-    # Label by the finding's real collector so provenance is honest (a Trivy CVE must
-    # not read as a Prowler check — DESIGN §13.4).
-    label = "Trivy" if item.get("source") == "trivy" else "Prowler"
-    if item.get("cve_ids"):
-        src = f"{label}: {item['check_id']}  |  https://nvd.nist.gov/vuln/detail/{item['cve_ids'][0]}"
-    else:
-        src = f"{label}: {item['check_id']}"
+    # Label + reference link resolve from the finding's real collector via SOURCES,
+    # so provenance is honest (a Trivy CVE must not read as a Prowler check — §13.4).
+    label, link = source_display(item)
+    src = f"{label}: {item['check_id']}"
+    if link:
+        src = f"{src}  |  {link}"
     return (f"🛡️ **[{priority}] {asset} — {ref}**\n"
             f"📊 KEV: {kev}  |  EPSS: {epss}  |  Exposure: {exposure}\n"
             f"{rationale['summary']}\n"

@@ -1022,6 +1022,24 @@ is unaffected; and `cmd_collect` propagates the error rather than swallowing it 
 Prowler-only degrade path. Remaining Trivy follow-ups: shared `make_finding()` schema
 constructor (⑨) and source→label/link map (⑩), plus robustness (⑦⑧).
 
+**Source→label/link map (2026-07-11, fixed).** The ⑩ follow-up above is now resolved.
+`run.py`'s `format_post` hard-coded provenance display as a ternary
+(`label = "Trivy" if source=="trivy" else "Prowler"`) plus an inline NVD link string —
+so adding a collector (e.g. DefectDojo) meant scattered edits, and the `else` branch
+silently mislabelled any non-Trivy source as "Prowler." Fix: a `SOURCES = {source ->
+(label, link_builder)}` map (same shape as the news harness's attribution map), a
+`_nvd_link(item)` builder (CVE→NVD detail, `None` when the finding carries no CVE), and a
+`source_display(item)` helper that resolves both from the finding's TRUSTED `source`
+field. `format_post` now just calls `source_display` and appends the link when present.
+An unknown/absent source falls back to `_DEFAULT_SOURCE` (bare `source` label + CVE→NVD
+link) so a new collector still posts sensibly before it gets its own row — safe because
+both real collectors set `source` explicitly (`collect.py` "trivy"/"prowler"), so the old
+default-to-Prowler was only a phantom fallback. Output is byte-identical to the ternary
+for every real finding. Verified offline (5/5): Trivy CVE, Prowler ±CVE, unknown source
+w/CVE (generic label + NVD link), and absent source w/o CVE (generic label, no link).
+Remaining Trivy follow-ups: shared `make_finding()` schema constructor (⑨) and
+robustness (⑦⑧, list-safe / empty-file guards).
+
 ### 13.8 Sub-milestones (this PR = S3.0–S3.3)
 
 - **S3.0 Design annex** — this §13.
