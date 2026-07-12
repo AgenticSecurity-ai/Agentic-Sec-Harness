@@ -368,7 +368,7 @@ the cross-harness session log; this checklist is the vulntriage-specific roadmap
      intact; live ledger/evidence untouched (§13.7).
    - 🟡 **S3.3 Config/docs** — README "Appendix — enabling Stage 3 Trivy" (incl. the
      ECR-discovery IAM note), SKILL "Stage 3" section, `.env.example`, this §8 sync.
-   - 🟡 **S3.4 DefectDojo** — import findings from DefectDojo (system of record) as a
+   - ✅ **S3.4 DefectDojo** — import findings from DefectDojo (system of record) as a
      **read-only** collector — one integration, N scanners. Design annex **§14** done
      (S3.4.0). **S3.4.1 read collector ✅** (`defectdojo_get` auth+pagination,
      `normalize_defectdojo` + triage-state gate, `collect_defectdojo`, `[defectdojo]`
@@ -377,9 +377,14 @@ the cross-harness session log; this checklist is the vulntriage-specific roadmap
      human-triaged findings dropped, dedup idempotent, three-collector merge clean).
      **S3.4.3 docs ✅** (README "Appendix — enabling Stage 3 DefectDojo" incl. read-only-token
      note + write-back deferral, SKILL "Stage 3" DefectDojo section, `.env.example`, this §8
-     sync). Only **live verification (S3.4.2)** remains. The *write-back* direction §8.3
-     first named ("push signed verdicts") is split off as a deferred opt-in (S3.4b,
-     §14.2) — it would be the first write outside Discord/ledger and is Stage-4-adjacent.
+     sync). **S3.4.2 live verification ✅** (throwaway DefectDojo `docker compose`; real
+     `/api/v2/findings/` envelope confirmed — CVEs live in `vulnerability_ids[]`, legacy `cve`
+     read-only; live collect imported 2 CVE findings, triaged 4 excluded server-side, KEV/EPSS
+     re-derived; full `run.py` e2e floored both to Critical + posted intact to the real Discord
+     channel with the `DefectDojo:` label; 403 fail-fast / unreachable + missing-token loud
+     degrade all live-exercised; live ledger/evidence byte-identical sha256 — §14.8). The
+     *write-back* direction §8.3 first named ("push signed verdicts") is split off as a deferred
+     opt-in (S3.4b, §14.2) — it would be the first write outside Discord/ledger and is Stage-4-adjacent.
    - ⏳ **S3.5 Off-host signing** — Sigstore keyless + Rekor / KMS-delegated signing;
      delivers the non-repudiation the v1 local-PEM path does not (separate PR).
 4. ⏳ **Phase 4–6 (execution)** — *this* is where the architecture escalates beyond B2:
@@ -1100,7 +1105,7 @@ a list report yields both findings without crashing. **All ten Trivy review item
 - **S3.1 Trivy collector** — `run_trivy()` + `normalize_trivy()` + `[trivy]` config + `--trivy-output` dry-run + `cmd_collect` merge; env toggle `VULNTRIAGE_TRIVY_ENABLED`.
 - **S3.2 Live verification** — pinned vulnerable image → real KEV/EPSS first-light → temp-ledger e2e → byte-identical restore.
 - **S3.3 Config/docs distribution** — README "Appendix — enabling Stage 3 Trivy" (incl. the ECR-discovery IAM note), SKILL "Stage 3" section, `.env.example`, DESIGN §8 roadmap sync (also correct the stale S2.4/S2.5 markers).
-- **S3.4 DefectDojo** (system of record) — read-only import collector; design annex now in **§14** (S3.4.0). Collector/live/docs = S3.4.1–.3, separate PR. Verdict write-back deferred (§14.2).
+- **S3.4 DefectDojo** (system of record) — read-only import collector; design annex in **§14** (S3.4.0). **Collector S3.4.1 ✅, docs S3.4.3 ✅, live verification S3.4.2 ✅** (all merged / verified — §14.8). Verdict write-back deferred (§14.2, S3.4b).
 - **S3.5 Off-host signing** (Sigstore keyless + Rekor / KMS) — *deferred, separate PR; delivers the non-repudiation the v1 local-PEM path deliberately does not (§3.5).*
 
 ## 14. Stage 3 design annex — DefectDojo collector (system of record)
@@ -1289,8 +1294,34 @@ state blocks it:
   5 human-triaged findings dropped, whitespace/injection description collapsed to inert DATA, no-id
   defensively dropped, dedup idempotent (ledger drops re-seen id), and Prowler+Trivy+DefectDojo merge
   with no id collision (33-check unit suite + CLI runs).
-- **S3.4.2 Live verification** — throwaway/non-prod DefectDojo → CVE finding → KEV/EPSS →
-  temp-ledger e2e → byte-identical restore; 401/403 fail-fast confirmed.
+- **S3.4.2 Live verification — ✅ done.** Stood up a throwaway DefectDojo (official `docker compose`
+  released images, bound to `127.0.0.1`), seeded 7 findings covering every disposition (2 open CVE-
+  bearing — Log4Shell/Spring4Shell, 1 open Info, 4 human-triaged: false_p/out_of_scope/is_mitigated/
+  duplicate). **Real-API shape confirmed against the hand-authored offline fixtures:** the live
+  `/api/v2/findings/` envelope carries CVEs as `vulnerability_ids: [{"vulnerability_id": "CVE-…"}]`
+  (dict form the harness reads) with the legacy `cve` field **read-only/`null` on write** — vindicating
+  the §14.4 decision to key CVE extraction on `vulnerability_ids[]`. **Live collect (read-only, Prowler
+  stubbed empty):** the harness's server-side triage query returned exactly the 3 open findings (the 4
+  triaged excluded server-side), the `[defectdojo].severities` gate dropped the Info one → 2 imported
+  as `defectdojo|12`/`defectdojo|13`, KEV/EPSS re-derived from the real CVEs (KEV=true, EPSS 0.99999/
+  0.99677) — DefectDojo's own `epss_score` in the envelope correctly **ignored**. **Full `run.py` e2e**
+  on a throwaway workspace copy + empty ledger: 2 triaged (0 dropped), **floor escalated both to
+  Critical** (KEV), evidence hash-chained (2 entries), and the digest posted intact to the **real
+  Discord channel** — read-back confirmed header + 2 Critical messages, each rendering the **`DefectDojo:`
+  source label** (not `Prowler:` — the §13.7-⑩ `SOURCES` map holds) + NVD link, no mid-block split.
+  **Fail-fast + loud degrade** all exercised live: bad token → HTTP 403 fail-fast (no retry) → loud
+  "NOT '0 findings = clean'" degrade (collect continues, exit 0); unreachable base_url → bounded retry
+  (4×, exp backoff) → same loud degrade; missing token → immediate loud degrade. **Live untouched:**
+  used a workspace *copy*, so the live ledger/evidence were never written — sha256 of `state/seen.json`
+  and `state/evidence.log` **byte-identical** before/after (seen=166, `evidence verify ok=True checked=166`).
+  DefectDojo torn down (`down -v`). **Instance-model caveat (documented):** this DefectDojo build runs
+  *legacy* authorization ("global permissions reduce to is_superuser/is_staff"), where RBAC product-/
+  global-role membership grants **no** finding read — so a true view-only token can't be minted on it
+  (read requires is_staff, which also writes). The harness's read-only guarantee therefore rests on
+  **code, not token scope**: the entire DefectDojo path issues only `Authorization: Token` **GET**
+  requests (the sole non-GET in `collect.py` is the Neo4j read-Cypher POST). On a modern RBAC DefectDojo
+  a Reader role IS view-only, so the §14.3 / S3.4.3 "provision a view-only token" recommendation stands
+  as defense-in-depth — but it is instance-config-dependent, not a harness invariant.
 - **S3.4.3 Config/docs distribution — ✅ done.** README "Appendix — enabling Stage 3 DefectDojo"
   (read-only view-only token provisioning, `VULNTRIAGE_DEFECTDOJO_TOKEN` host-env/cron `--command-env`
   injection, `[defectdojo]` base_url/scope, `VULNTRIAGE_DEFECTDOJO_ENABLED` toggle,
