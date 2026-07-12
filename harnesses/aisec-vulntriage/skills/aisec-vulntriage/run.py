@@ -357,6 +357,7 @@ def _nvd_link(item):
 SOURCES = {
     "trivy": ("Trivy", _nvd_link),
     "prowler": ("Prowler", _nvd_link),
+    "defectdojo": ("DefectDojo", _nvd_link),
 }
 _DEFAULT_SOURCE = ("source", _nvd_link)
 
