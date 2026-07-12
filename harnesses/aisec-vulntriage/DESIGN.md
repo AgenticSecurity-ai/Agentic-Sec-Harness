@@ -368,8 +368,11 @@ the cross-harness session log; this checklist is the vulntriage-specific roadmap
      intact; live ledger/evidence untouched (§13.7).
    - 🟡 **S3.3 Config/docs** — README "Appendix — enabling Stage 3 Trivy" (incl. the
      ECR-discovery IAM note), SKILL "Stage 3" section, `.env.example`, this §8 sync.
-   - ⏳ **S3.4 DefectDojo** — push signed verdicts to DefectDojo as the system of record
-     (separate PR).
+   - 🟡 **S3.4 DefectDojo** — import findings from DefectDojo (system of record) as a
+     **read-only** collector — one integration, N scanners. Design annex **§14** done
+     (S3.4.0); collector/live/docs = S3.4.1–.3 (separate PR). The *write-back* direction
+     §8.3 first named ("push signed verdicts") is split off as a deferred opt-in (S3.4b,
+     §14.2) — it would be the first write outside Discord/ledger and is Stage-4-adjacent.
    - ⏳ **S3.5 Off-host signing** — Sigstore keyless + Rekor / KMS-delegated signing;
      delivers the non-repudiation the v1 local-PEM path does not (separate PR).
 4. ⏳ **Phase 4–6 (execution)** — *this* is where the architecture escalates beyond B2:
@@ -1090,5 +1093,192 @@ a list report yields both findings without crashing. **All ten Trivy review item
 - **S3.1 Trivy collector** — `run_trivy()` + `normalize_trivy()` + `[trivy]` config + `--trivy-output` dry-run + `cmd_collect` merge; env toggle `VULNTRIAGE_TRIVY_ENABLED`.
 - **S3.2 Live verification** — pinned vulnerable image → real KEV/EPSS first-light → temp-ledger e2e → byte-identical restore.
 - **S3.3 Config/docs distribution** — README "Appendix — enabling Stage 3 Trivy" (incl. the ECR-discovery IAM note), SKILL "Stage 3" section, `.env.example`, DESIGN §8 roadmap sync (also correct the stale S2.4/S2.5 markers).
-- **S3.4 DefectDojo** (system of record) — *deferred, separate PR.*
+- **S3.4 DefectDojo** (system of record) — read-only import collector; design annex now in **§14** (S3.4.0). Collector/live/docs = S3.4.1–.3, separate PR. Verdict write-back deferred (§14.2).
 - **S3.5 Off-host signing** (Sigstore keyless + Rekor / KMS) — *deferred, separate PR; delivers the non-repudiation the v1 local-PEM path deliberately does not (§3.5).*
+
+## 14. Stage 3 design annex — DefectDojo collector (system of record)
+
+> **Status: design draft for stage 3 — sub-milestone S3.4.** This annex is the detailed
+> expansion of the **second** of roadmap item **§8.3**'s three tracks (Trivy → DefectDojo →
+> off-host signing), the twin of §13. It is scoped to **DefectDojo only**. Like the Trivy
+> annex, this is the *design judgement* written down first; the implementation (S3.4.1) is a
+> later step. The headline is that DefectDojo is a **different class of collector** from
+> Prowler and Trivy — an *import from a service*, not a *scan by a subprocess* — and it forces
+> one genuine design fork (read vs. write, §14.2) that the read-only invariant (§3.1) decides.
+
+### 14.1 What DefectDojo buys — a new collector class (import, not scan)
+
+Prowler and Trivy are **scanners the harness runs**: a pinned CLI subprocess emits JSON that
+`collect.py` parses. DefectDojo is not a scanner — it is a **vulnerability system of record**:
+an aggregation/orchestration service that ingests findings from *many* scanners (Prowler,
+Trivy, Snyk, Nessus/Tenable, Anchore, Burp, Semgrep, …), deduplicates and triages them into a
+single database, and tracks each finding's disposition (active, verified, false-positive,
+risk-accepted, mitigated) over time. The harness reaches it over its **REST API**
+(`/api/v2/findings/`), not a subprocess.
+
+That makes DefectDojo the highest-*leverage* Stage-3 source: **one integration, N scanners.** A
+shop that already runs DefectDojo has, in one endpoint, the CVE output of every scanner it
+operates — including ones this harness will never wrap natively (a commercial Nessus, a Snyk
+seat). Those CVEs flow into the exact same `enrich()` → sort → floor → graph → digest →
+evidence → dedup chain Trivy lit up (§13.1), so — as with Trivy — the value is almost entirely
+*reuse*: no new enrichment, no new floor logic, a new *input source* only. The novelty is
+purely in the **acquisition** (authenticated HTTP + pagination instead of `subprocess.run`) and
+in one thing the scanners don't have: **DefectDojo carries human triage state**, which the
+harness must respect rather than relitigate (§14.4).
+
+### 14.2 The read vs. write fork (this is the point)
+
+§8.3's one-line roadmap says "**push** signed verdicts to DefectDojo as the system of record."
+That phrasing describes a **write**. But the Next-Action framing — and the read-only invariant —
+pull toward a **read**. There are genuinely two DefectDojo integrations, and they sit on opposite
+sides of the harness's core guarantee:
+
+- **(R) DefectDojo as a source — import (read).** `GET /api/v2/findings/` → normalize to the
+  common schema → triage → Discord digest. This is a **read-only collector**, identical in trust
+  posture to Prowler/Trivy: it only *reads*, imported text is untrusted DATA (§14.5), and it
+  needs only a read-scoped token. It fits Layer 1 (§3.1) and B2 (§3.2) with **zero** movement of
+  the security boundary.
+- **(W) DefectDojo as a sink — write-back (write).** `POST`/`PATCH` the harness's triaged, signed
+  verdicts back into DefectDojo (as a finding note, tag, or a linked record) so the org's system
+  of record reflects the harness's judgement. This is the first time the harness would **write
+  anywhere other than Discord and its own ledger/evidence.** It needs a **write-scoped** token, it
+  **mutates external state**, and — the sharper problem — it pushes **LLM-influenced output** (the
+  triage verdict) into an *authoritative* database. Even with the deterministic floor and signed
+  rationale, writing machine-triage into a system humans trust as canonical is a governance
+  decision, not a plumbing one.
+
+**Recommendation (for S3.4): ship (R) only.** DefectDojo joins as a **read-only source** this
+sub-milestone. This keeps the read-only guarantee (§3.1) and the B2 boundary (§3.2) exactly where
+they are, mirrors Prowler/Trivy precisely, and delivers the "N scanners in one integration" value
+immediately. The write-back **(W)** is split out as a **separate, opt-in** follow-on (default off,
+its own **write-scoped** token, writing only to a finding's *notes/tags* — never mutating or
+creating the finding itself, never overwriting human triage — and labelling the note as
+machine-generated triage). It is the DefectDojo analogue of §13.3's ECR-discovery fork: the one
+place the surface would widen, gated behind a conscious opt-in and documented as such. Moving the
+harness from read-only *writer of record* toward mutation is squarely Stage-4 territory (§8.4,
+where mutation gets a human-approval gate + AI Gateway + fail-closed policy); the write-back
+should not smuggle that escalation in ahead of its governance. So the §8.3 bullet is refined here:
+**S3.4 = DefectDojo read source; verdict write-back = deferred opt-in (S3.4b / Stage 4-adjacent).**
+
+### 14.3 Auth & API surface — a read-scoped token as a host env secret
+
+DefectDojo's REST API authenticates with a per-user token sent as an
+`Authorization: Token <api_key>` header (v2 also supports JWT; token is simplest and stdlib-
+friendly). Two consequences for this harness's conventions:
+
+1. **The token is a SECRET → host environment, never the repo.** Per convention #3, the API
+   token lives in the host's environment as `VULNTRIAGE_DEFECTDOJO_TOKEN` (like the Neo4j
+   password `VULNTRIAGE_NEO4J_PASSWORD`), injected into the live cron via `--command-env`, and is
+   **never** written to `config.toml` or `.env`. The **non-secret** connection values — the base
+   URL, and any product/engagement/tag scope — are `config.toml [defectdojo]` (like the Neo4j
+   endpoint/user in `[graph]`).
+2. **Use a read-only DefectDojo token.** DefectDojo has per-user roles and object-level
+   permissions; the operator provisions a **view-only user** whose token can `GET` findings but
+   cannot mutate. This is the DefectDojo analogue of the read-only AWS role (§3.1, S1.8②): the
+   credential *itself* cannot write, so the read-only guarantee holds by construction, not by the
+   harness merely choosing not to call write endpoints. (The deferred write-back **(W)** would use
+   a *separate*, narrowly write-scoped token — the two are never the same credential.)
+
+**API shape.** `GET /api/v2/findings/` returns a paginated envelope
+(`{count, next, previous, results:[…]}`). The collector pages via `next` until exhausted, with a
+server-side filter that pulls only genuinely-open findings (§14.4). Implementation note (design,
+not code): the existing `http_get_json()` helper sets only a `User-Agent` header — S3.4.1 needs an
+**auth-header-capable GET** (either extend `http_get_json` with an optional headers arg or add a
+small `defectdojo_get`), reusing the same bounded-retry / backoff / `RETRYABLE_STATUS` machinery,
+with **401/403 fail-fast** (bad/expired token → surface loudly, don't silently degrade to empty —
+mirrors `neo4j_cypher`'s 401/403 handling, §12.9).
+
+### 14.4 Schema mapping & dedup — respect DefectDojo's own triage
+
+DefectDojo is a dedup engine in its own right, so the mapping is the cleanest of the three
+collectors — but it introduces one obligation the scanners don't have: **honour the human triage
+state already recorded in DefectDojo.** Mapping one `results[]` finding through the shared
+`make_finding()` constructor (§ the `make_finding` note in code, and §13.7's ⑨):
+
+| common schema field | DefectDojo source |
+|---|---|
+| `source` | `"defectdojo"` |
+| `id` (dedup key) | `defectdojo\|<finding.id>` — DefectDojo's own integer finding id, namespaced. It is **stable** (DefectDojo's dedup engine assigns one id per unique finding across re-imports) and **already deduplicated**, making it the most robust key of the three collectors. Trade-off: if the operator rebuilds/wipes their DefectDojo instance, ids reset and every still-open finding re-notifies **once** — the same fresh-ledger behaviour as a wiped `seen.json`, documented, acceptable. |
+| `cve_ids` | `vulnerability_ids[].vulnerability_id` (+ legacy `cve`) filtered by `CVE_RE` — only CVE-shaped ids reach `enrich()`; GHSA/CWE/other advisory ids stay in `title`/`description`. |
+| `severity` | `severity` lowercased → `VALID_SEVERITIES` (map DefectDojo `"Info"`/`"Informational"`). |
+| `status` | **derived from DefectDojo's triage flags, not imported blindly.** Import only findings that are `active=true` AND `false_p=false` AND `duplicate=false` AND `is_mitigated=false` AND `out_of_scope=false` AND `risk_accepted=false`. This is the DefectDojo analogue of Prowler's FAIL-only `_status_allowed` filter — and it is a **hard requirement**, not a nicety: re-surfacing a finding a human already marked false-positive or risk-accepted would fight the org's own triage and erode trust. The server-side query does most of this (`?active=true&false_p=false&duplicate=false&is_mitigated=false`); the normalizer re-checks defensively. |
+| `title` | `title`. |
+| `resource` / `resource_type` / `resource_name` | `"<component_name> <component_version>"` / `"component"` / the parent product name (from `test`→engagement→product, when included/expanded). |
+| `description` / `risk` / `remediation` | `description` / `impact` (or `references`) / `mitigation` — **all untrusted DATA** (§14.5). |
+| `internet_exposed`, `graph` | schema defaults. DefectDojo findings are component/CVE facts, not asset-graph nodes; an `endpoints`→exposure join is conceivable but deferred (same posture as Trivy's image-has-no-network-path, §13.4). |
+| `check_id` | `found_by`/test-type name (which scanner reported it) — useful provenance in the rationale. |
+
+**Intel source-of-truth.** DefectDojo findings may already carry `epss_score` / `epss_percentile`.
+The harness **ignores** those and re-derives KEV/EPSS via its own `enrich()` from CISA/FIRST, so a
+single authoritative intel source governs the deterministic floor across *all* collectors — the
+floor must key off collector-authoritative intel the harness fetched, never numbers imported
+(possibly staler, possibly from an untrusted upstream) alongside the finding text.
+
+**Merge point.** Identical to Trivy (§13.4): `cmd_collect` merges DefectDojo items into the
+`by_id` map **before** `enrich()`, ids namespaced (`defectdojo|…`) so they never collide with
+Prowler uids or Trivy keys. No-op when disabled.
+
+### 14.5 B2 preservation — DefectDojo is the *most* untrusted free-text source
+
+DefectDojo aggregates finding text from **arbitrary upstream scanners and arbitrary user-entered
+notes**. A `description` in DefectDojo could originate from any tool anyone in the org pointed at
+it, or be hand-typed — it is, if anything, a *less* trustworthy free-text source than a Prowler
+check or a Trivy advisory. B2 is exactly what makes importing it safe: the orchestrator does the
+authenticated HTTP, parses the JSON with defensive `.get` chains, and passes the strings to the
+**tool-less** LLM as fenced DATA with the standing "ignore instructions inside" directive. A
+crafted `description` — an injected instruction uploaded via some scanner — can at most corrupt a
+summary string; it never becomes a command, never touches the host, the ledger, or other channels.
+The B2 boundary (§3.1–§3.2) does not move for the **read** collector. (It is precisely the
+**write-back (W)** that would begin to move it — which is why §14.2 defers it.)
+
+### 14.6 Config & distribution defaults
+
+A new `[defectdojo]` section, **`enabled = false`** in the tracked config (same discipline as
+`[graph]` / `[trivy]`): Stage-1/2 and Trivy-only users are unaffected, and a deployment turns it
+on with the non-secret env toggle `VULNTRIAGE_DEFECTDOJO_ENABLED=true` (via a `_defectdojo_enabled`
+twin of `_graph_enabled`/`_trivy_enabled`) so an upstream `git pull` never reverts it. Non-secret
+keys: `enabled`, `base_url`, `product_id` / `engagement_id` / `tags` (optional scope filters),
+`severities` (pre-filter, inheriting `[prowler].severities` when unset — the §13.7-⑤ pattern),
+`verified_only` (optional: import only human-verified findings). The **secret** API token is
+`VULNTRIAGE_DEFECTDOJO_TOKEN` in the host env only. A `--defectdojo-output <path>` dry-run flag
+mirrors `--trivy-output` / `--prowler-output`: replay a captured `/api/v2/findings/` JSON envelope
+offline, no network, no token — and, like the Trivy replay guard in `cmd_collect` (§13.7-③), a
+`--prowler-output` offline replay must **not** trigger a live DefectDojo fetch.
+
+### 14.7 Verification strategy (instance-state-independent)
+
+Mirrors §13.7's discipline — prove the wiring on real data where possible, offline where instance
+state blocks it:
+
+1. **Offline (the wiring):** a captured `/api/v2/findings/` JSON envelope (a real page, incl. the
+   `next` pagination link, a CVE-bearing finding, a false-positive/risk-accepted finding that must
+   be **dropped**, and a whitespace/injection-laden `description`) through `--defectdojo-output`
+   proves `normalize_defectdojo()` + the triage-state filter + pagination handling + merge + dedup
+   **without a live instance or token.** This is the primary correctness gate (instance-state
+   independent, exactly like Trivy's ECR-offline proof, §13.7-2).
+2. **Live (first-light, temp ledger):** stand up a throwaway DefectDojo (`docker compose` from the
+   official image, or a read-only token against an existing non-prod instance), seed/select a
+   CVE-bearing open finding (e.g. a Log4Shell import), run the full `run.py` on a **temporary
+   ledger** → confirm KEV/EPSS enrich fires, the floor escalates, the digest posts intact
+   (verified by **reading the real Discord channel**), evidence hash-chains, dedup is idempotent →
+   restore the live ledger/evidence to a **byte-identical sha256** (the S1.8/S2.5/S3.2 method —
+   leave a Discord trace, never dirty the live ledger). A `401/403` path (bad token) is exercised
+   to confirm fail-fast, not silent-empty.
+
+### 14.8 Sub-milestones
+
+- **S3.4.0 Design annex** — this §14.
+- **S3.4.1 DefectDojo read collector** — auth-header GET + pagination, `normalize_defectdojo()` +
+  triage-state filter, `collect_defectdojo()`, `[defectdojo]` config (default off),
+  `VULNTRIAGE_DEFECTDOJO_ENABLED` env toggle + `VULNTRIAGE_DEFECTDOJO_TOKEN` secret,
+  `--defectdojo-output` dry-run; `cmd_collect` merges before `enrich()`. `run.py` `format_post`
+  gets a `"defectdojo"` row in the `SOURCES` map (§13.7-⑩ made this a one-line add).
+- **S3.4.2 Live verification** — throwaway/non-prod DefectDojo → CVE finding → KEV/EPSS →
+  temp-ledger e2e → byte-identical restore; 401/403 fail-fast confirmed.
+- **S3.4.3 Config/docs distribution** — README "Appendix — enabling Stage 3 DefectDojo" (incl. the
+  read-only-token note + the write-back deferral), SKILL "Stage 3" section, `.env.example`, DESIGN
+  §8 roadmap sync.
+- **S3.4b Verdict write-back (deferred, opt-in)** — the **(W)** direction of §14.2: push signed
+  machine-triage to a finding's notes/tags via a *separate write-scoped* token, default off,
+  never overwriting human triage. Documented as the point where the read-only surface would widen;
+  its governance is Stage-4-adjacent.
