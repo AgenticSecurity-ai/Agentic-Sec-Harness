@@ -178,3 +178,41 @@ ecr_discovery = false
 # silently unfiltered while Prowler is filtered); if both are empty, keeps all.
 # Unknown/unscored ('') is always kept.
 severities = ["critical", "high", "medium"]
+
+[defectdojo]
+# Stage 3 DefectDojo import collector — see DESIGN.md §14. OFF by default: v1/Stage-1/
+# Stage-2, Trivy-only, and everyone without a DefectDojo instance are unaffected.
+# DefectDojo is a vulnerability SYSTEM OF RECORD that aggregates findings from many
+# scanners (Prowler, Trivy, Snyk, Nessus, …); this collector IMPORTS its open findings
+# over the REST API — one integration, N scanners. It is a READ, not a scan and not a
+# write: the harness only GETs findings (verdict write-back is a separate, deferred,
+# opt-in follow-on — DESIGN §14.2). Every imported finding may carry a CVE, so these
+# flow into the SAME enrich → floor → digest → evidence → ledger chain with no new
+# logic. Still READ-ONLY and B2-preserving: imported text is UNTRUSTED DATA for the
+# tool-less LLM. Turn it on with the non-secret env var VULNTRIAGE_DEFECTDOJO_ENABLED=
+# true (like the channel id / graph / Trivy toggles), so an upstream pull never reverts
+# it; leave this false in the tracked config.
+enabled = false
+
+# Base URL of your DefectDojo instance (NON-secret). The collector appends
+# /api/v2/findings/. Example: base_url = "https://defectdojo.internal.example.com"
+base_url = ""
+
+# The API token is a SECRET and is NEVER placed here or in .env — it lives in the host
+# environment as VULNTRIAGE_DEFECTDOJO_TOKEN (convention #3), injected into cron via
+# --command-env. Provision a READ-ONLY (view-only) DefectDojo user so the token itself
+# cannot mutate — the read-only guarantee then holds by construction (DESIGN §14.3).
+
+# Optional scope filters (all NON-secret). Leave unset to import across the whole
+# instance; set to narrow to one product / engagement / tag set.
+#   product_id = 42
+#   engagement_id = 7
+#   tags = ["prod", "external"]
+
+# Import only human-VERIFIED findings (in addition to the open-state gate). Optional.
+verified_only = false
+
+# Coarse severity pre-filter (before the LLM triage), same idea as [trivy].severities.
+# If unset/empty, inherits [prowler].severities; if both are empty, keeps all.
+# Unknown/unscored ('') is always kept.
+severities = ["critical", "high", "medium"]

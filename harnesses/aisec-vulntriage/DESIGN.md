@@ -370,8 +370,13 @@ the cross-harness session log; this checklist is the vulntriage-specific roadmap
      ECR-discovery IAM note), SKILL "Stage 3" section, `.env.example`, this §8 sync.
    - 🟡 **S3.4 DefectDojo** — import findings from DefectDojo (system of record) as a
      **read-only** collector — one integration, N scanners. Design annex **§14** done
-     (S3.4.0); collector/live/docs = S3.4.1–.3 (separate PR). The *write-back* direction
-     §8.3 first named ("push signed verdicts") is split off as a deferred opt-in (S3.4b,
+     (S3.4.0). **S3.4.1 read collector ✅** (`defectdojo_get` auth+pagination,
+     `normalize_defectdojo` + triage-state gate, `collect_defectdojo`, `[defectdojo]`
+     config default off + `VULNTRIAGE_DEFECTDOJO_ENABLED` toggle + `--defectdojo-output`
+     dry-run, `SOURCES` row; offline captured-envelope gate PASS — KEV/EPSS fires,
+     human-triaged findings dropped, dedup idempotent, three-collector merge clean).
+     Live verification (S3.4.2) + docs (S3.4.3) remain. The *write-back* direction §8.3
+     first named ("push signed verdicts") is split off as a deferred opt-in (S3.4b,
      §14.2) — it would be the first write outside Discord/ledger and is Stage-4-adjacent.
    - ⏳ **S3.5 Off-host signing** — Sigstore keyless + Rekor / KMS-delegated signing;
      delivers the non-repudiation the v1 local-PEM path does not (separate PR).
@@ -1268,11 +1273,20 @@ state blocks it:
 ### 14.8 Sub-milestones
 
 - **S3.4.0 Design annex** — this §14.
-- **S3.4.1 DefectDojo read collector** — auth-header GET + pagination, `normalize_defectdojo()` +
-  triage-state filter, `collect_defectdojo()`, `[defectdojo]` config (default off),
-  `VULNTRIAGE_DEFECTDOJO_ENABLED` env toggle + `VULNTRIAGE_DEFECTDOJO_TOKEN` secret,
-  `--defectdojo-output` dry-run; `cmd_collect` merges before `enrich()`. `run.py` `format_post`
-  gets a `"defectdojo"` row in the `SOURCES` map (§13.7-⑩ made this a one-line add).
+- **S3.4.1 DefectDojo read collector — ✅ done (offline-verified).** `defectdojo_get()`
+  (auth-header GET + bounded retry, 401/403 fail-fast as `DefectDojoError`), `_defectdojo_findings`
+  (live `next`-link pagination or a captured envelope / list-of-envelopes), `normalize_defectdojo()`
+  + the `_defectdojo_open` triage-state gate (drops false_p/duplicate/is_mitigated/out_of_scope/
+  risk_accepted/inactive), `collect_defectdojo()` (severity pre-filter inheriting `[prowler]`,
+  loud degrade-to-other-collectors on fetch failure — never a silent empty), `[defectdojo]` config
+  (default off), `VULNTRIAGE_DEFECTDOJO_ENABLED` env toggle + `VULNTRIAGE_DEFECTDOJO_TOKEN` secret,
+  `--defectdojo-output` dry-run; `cmd_collect` merges before `enrich()` (same offline-replay guard
+  as Trivy). `run.py` `format_post` got a `"defectdojo"` row in the `SOURCES` map (§13.7-⑩ made this
+  a one-line add). **Offline gate (§14.7-1) PASS:** captured `/api/v2/findings/` envelope → CVE
+  extracted from `vulnerability_ids[]`, KEV/EPSS enrich fires (CVE-2021-44228 KEV=true EPSS=0.99999),
+  5 human-triaged findings dropped, whitespace/injection description collapsed to inert DATA, no-id
+  defensively dropped, dedup idempotent (ledger drops re-seen id), and Prowler+Trivy+DefectDojo merge
+  with no id collision (33-check unit suite + CLI runs).
 - **S3.4.2 Live verification** — throwaway/non-prod DefectDojo → CVE finding → KEV/EPSS →
   temp-ledger e2e → byte-identical restore; 401/403 fail-fast confirmed.
 - **S3.4.3 Config/docs distribution** — README "Appendix — enabling Stage 3 DefectDojo" (incl. the

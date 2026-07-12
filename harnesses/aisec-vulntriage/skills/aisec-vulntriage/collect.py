@@ -10,7 +10,10 @@ deps, no secrets.
 WHAT IT DOES (DESIGN.md §4 steps 1-2):
   1. Runs Prowler (read-only CSPM) over the configured AWS scope and reads its
      JSON-OCSF output. When [trivy].enabled (stage 3, DESIGN §13), also runs Trivy
-     over the configured images and merges its CVE findings.
+     over the configured images and merges its CVE findings. When
+     [defectdojo].enabled (stage 3, DESIGN §14), also IMPORTS open findings from a
+     DefectDojo instance over its REST API — a system-of-record aggregating many
+     scanners — read-only, honoring DefectDojo's own human triage state.
   2. Normalizes each finding to a common schema, de-duplicates against the ledger,
      extracts any referenced CVE ids, and enriches them from free public intel
      feeds (CISA KEV membership, FIRST EPSS score, optionally NVD CVSS).
@@ -56,6 +59,7 @@ import argparse
 import tempfile
 import tomllib
 import subprocess
+import urllib.parse
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
@@ -244,6 +248,59 @@ def neo4j_cypher(endpoint, user, password, statement, params=None,
     result = (doc.get("results") or [{}])[0]
     cols = result.get("columns", [])
     return [dict(zip(cols, row.get("row", []))) for row in result.get("data", [])]
+
+
+# --------------------------------------------------------------------------- #
+# DefectDojo REST API (stage 3, DESIGN §14) — authenticated read-only GET       #
+#                                                                              #
+# DefectDojo is a vulnerability system of record (it aggregates MANY scanners), #
+# reached over its REST API with an `Authorization: Token <key>` header, NOT a   #
+# subprocess. The token is a SECRET (host env VULNTRIAGE_DEFECTDOJO_TOKEN,       #
+# convention #3) and the operator provisions a READ-ONLY (view-only) token, so   #
+# the read-only guarantee holds by construction (§14.3). Same trust posture as   #
+# every other collector: imported text is UNTRUSTED DATA for the tool-less LLM.  #
+# --------------------------------------------------------------------------- #
+class DefectDojoError(RuntimeError):
+    """DefectDojo's REST API returned an auth/other 4xx error, or was unreachable
+    after retries. Raised so a bad/expired token or a down instance surfaces LOUDLY
+    rather than silently degrading to an empty finding set (which would read as
+    "0 findings = clean"). The caller catches it, logs the degrade explicitly, and
+    continues with the other collectors — mirrors neo4j_cypher's 401/403 fail-fast
+    (DESIGN §14.3)."""
+
+
+def defectdojo_get(url, token):
+    """GET a DefectDojo REST URL with an `Authorization: Token` header and parse
+    JSON. Bounded retry on transient failures (same backoff as the intel feeds);
+    401/403 and any other non-retryable status fail fast as DefectDojoError (a bad
+    token must not be retried or silently swallowed). Twin of http_get_json with an
+    auth header and a typed error for fail-fast handling."""
+    req = urllib.request.Request(url, headers={
+        "User-Agent": USER_AGENT,
+        "Authorization": f"Token {token}",
+        "Accept": "application/json",
+    })
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as r:
+                return json.loads(r.read().decode("utf-8", errors="replace"))
+        except urllib.error.HTTPError as e:
+            if e.code in RETRYABLE_STATUS and attempt < MAX_RETRIES:
+                delay = _retry_delay(attempt, e)
+                _log(f"[warn] defectdojo HTTP {e.code}; retry "
+                     f"{attempt + 1}/{MAX_RETRIES} in {delay:.1f}s")
+                time.sleep(delay)
+                continue
+            # 401/403 (bad/expired token) and other 4xx: do not retry — fail fast.
+            raise DefectDojoError(f"DefectDojo HTTP {e.code} at {url}: {e.reason}")
+        except (urllib.error.URLError, TimeoutError) as e:
+            if attempt < MAX_RETRIES:
+                delay = _retry_delay(attempt)
+                _log(f"[warn] defectdojo {type(e).__name__} ({e}); retry "
+                     f"{attempt + 1}/{MAX_RETRIES} in {delay:.1f}s")
+                time.sleep(delay)
+                continue
+            raise DefectDojoError(f"DefectDojo unreachable at {url}: {e}")
 
 
 # --------------------------------------------------------------------------- #
@@ -634,6 +691,238 @@ def collect_trivy(cfg, trivy_bin, trivy_output=None):
              "(no Trivy findings this run)")
         return []
     _log(f"[trivy] {len(items)} finding(s) after severity filter")
+    return items
+
+
+# --------------------------------------------------------------------------- #
+# DefectDojo (stage 3, DESIGN §14) — import from a system of record. Unlike      #
+# Prowler/Trivy this is NOT a scanner the harness runs: it reads already-        #
+# aggregated findings (from N upstream scanners) over the REST API. Every         #
+# DefectDojo finding may carry a CVE, so — like Trivy — these light up the        #
+# KEV/EPSS/NVD enrichment with no new floor logic. The one obligation the         #
+# scanners don't have: DefectDojo carries HUMAN TRIAGE STATE, which the harness   #
+# must respect (import only genuinely-open findings, never re-surface a finding   #
+# a human already marked false-positive / risk-accepted — §14.4). Read-only and   #
+# B2-preserving: imported free-text is the MOST untrusted source (§14.5).         #
+# --------------------------------------------------------------------------- #
+
+# DefectDojo intel numbers (its own epss_score/percentile) are DELIBERATELY
+# ignored: the harness re-derives KEV/EPSS via enrich() so a single authoritative
+# intel source governs the floor across ALL collectors (§14.4). CVEs come only
+# from vulnerability_ids[] (+ the legacy `cve` field), filtered by CVE_RE.
+MAX_DEFECTDOJO_PAGES = 200   # pagination safety cap (200 * page_size findings)
+DEFECTDOJO_PAGE_SIZE = 100
+
+
+def _defectdojo_open(f):
+    """Whether a DefectDojo finding is genuinely OPEN and un-triaged, so importing
+    it does not fight the org's own triage (DESIGN §14.4 — a HARD requirement). The
+    live query already filters server-side; this re-checks defensively on both the
+    live and captured (--defectdojo-output) paths. active must be true AND none of
+    the disposition flags set."""
+    return (bool(f.get("active"))
+            and not bool(f.get("false_p"))
+            and not bool(f.get("duplicate"))
+            and not bool(f.get("is_mitigated"))
+            and not bool(f.get("out_of_scope"))
+            and not bool(f.get("risk_accepted")))
+
+
+def normalize_defectdojo(finding, product_name=""):
+    """Map one DefectDojo `/api/v2/findings/` result to the SAME common finding
+    schema (via make_finding) every downstream step consumes. Returns None for a
+    record with no usable id or one that is not genuinely open (defensive re-check of
+    the triage state — §14.4). Defensive .get chains: a shape drift degrades a field
+    rather than crashing the run."""
+    fid_id = finding.get("id")
+    if fid_id is None or str(fid_id).strip() == "":
+        return None
+    if not _defectdojo_open(finding):
+        return None
+
+    # Dedup key: DefectDojo's own integer finding id, namespaced. It is stable and
+    # already deduplicated by DefectDojo's engine, making it the most robust key of
+    # the three collectors (§14.4). Trade-off: wiping/rebuilding the instance resets
+    # ids and re-notifies every still-open finding ONCE — same as a wiped seen.json.
+    fid = f"defectdojo|{fid_id}"
+
+    # CVEs from vulnerability_ids[] (+ legacy `cve`), CVE-shaped only. GHSA/CWE/other
+    # advisory ids stay in the title/description for the LLM but never reach the feeds.
+    raw_ids = []
+    for v in finding.get("vulnerability_ids") or []:
+        raw_ids.append(str(v.get("vulnerability_id", "")) if isinstance(v, dict)
+                       else str(v))
+    if finding.get("cve"):
+        raw_ids.append(str(finding.get("cve")))
+    cve_ids = sorted({m.group(0).upper()
+                      for s in raw_ids for m in CVE_RE.finditer(s)})
+
+    severity = str(finding.get("severity", "")).strip().lower()
+    if severity in ("info", "informational"):
+        severity = "informational"
+    if severity not in VALID_SEVERITIES:
+        severity = ""
+
+    # check_id: the first vulnerability id if present (consistent with Trivy's vid),
+    # else which scanner reported it (found_by provenance), else the namespaced id.
+    found_by = finding.get("found_by") or []
+    scanner = (", ".join(str(x) for x in found_by) if isinstance(found_by, list)
+               else str(found_by)).strip()
+    check_id = (raw_ids[0] if raw_ids else "") or scanner or f"DD-{fid_id}"
+
+    comp_name = str(finding.get("component_name", "")).strip()
+    comp_ver = str(finding.get("component_version", "")).strip()
+    component = f"{comp_name} {comp_ver}".strip()
+
+    return make_finding(
+        fid=fid,
+        source="defectdojo",
+        check_id=check_id,
+        title=str(finding.get("title", "")).strip() or check_id,
+        severity=severity,
+        # Only open findings reach here (filtered above); there is no PASS axis.
+        status="FAIL",
+        resource=component,
+        resource_type="component",
+        resource_name=product_name or comp_name or component,
+        description=str(finding.get("description", "")).strip(),
+        # impact, else references, as the risk narrative (both untrusted DATA).
+        risk=str(finding.get("impact") or finding.get("references") or "").strip(),
+        remediation=str(finding.get("mitigation", "")).strip(),
+        # A DefectDojo finding is a component/CVE fact, not an asset-graph node; an
+        # endpoints→exposure join is conceivable but deferred (§14.4), same posture
+        # as Trivy's image-has-no-network-path.
+        internet_exposed=False,
+        cve_ids=cve_ids,
+    )
+
+
+def _defectdojo_enabled(dd_cfg):
+    """Whether Stage-3 DefectDojo import is on. A deployment flips it with the
+    non-secret VULNTRIAGE_DEFECTDOJO_ENABLED env var (like the graph / Trivy toggles,
+    convention #3) WITHOUT editing the shipped default, which stays
+    `[defectdojo].enabled=false` so self-hosters are unaffected. Env, when set non-
+    empty, wins; otherwise fall back to [defectdojo].enabled. Twin of _trivy_enabled.
+    (The API token is a SECRET and stays in the host env, never in config/.env — see
+    VULNTRIAGE_DEFECTDOJO_TOKEN.)"""
+    env = os.environ.get("VULNTRIAGE_DEFECTDOJO_ENABLED")
+    if env is not None and env.strip() != "":
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    return bool(dd_cfg.get("enabled", False))
+
+
+def _read_defectdojo_json(path):
+    """Read a captured DefectDojo findings JSON (a single `/api/v2/findings/` envelope
+    or a list of them, from --defectdojo-output). An empty/invalid file raises
+    DefectDojoError so collect_defectdojo degrades cleanly with a loud log rather than
+    aborting the run with a JSON traceback (twin of _read_trivy_json's contract)."""
+    with open(path, encoding="utf-8") as f:
+        raw = f.read()
+    if not raw.strip():
+        raise DefectDojoError(f"DefectDojo output file {path} is empty")
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise DefectDojoError(f"DefectDojo output file {path} is not valid JSON: {e}")
+
+
+def _defectdojo_query_params(dcfg):
+    """Server-side filter for GET /api/v2/findings/: the triage-state gate (§14.4) plus
+    optional scope. Client-side severity filtering + the defensive _defectdojo_open
+    re-check still apply; these params just avoid pulling obviously-triaged findings."""
+    params = {
+        "active": "true", "false_p": "false", "duplicate": "false",
+        "is_mitigated": "false", "out_of_scope": "false", "risk_accepted": "false",
+        "limit": str(DEFECTDOJO_PAGE_SIZE),
+    }
+    if dcfg.get("verified_only"):
+        params["verified"] = "true"
+    # Optional scope filters (nested DRF lookups); ignored by DefectDojo if unset.
+    if dcfg.get("product_id"):
+        params["test__engagement__product"] = str(dcfg["product_id"])
+    if dcfg.get("engagement_id"):
+        params["test__engagement"] = str(dcfg["engagement_id"])
+    tags = dcfg.get("tags") or []
+    if tags:
+        params["tags"] = ",".join(str(t) for t in tags)
+    return params
+
+
+def _defectdojo_findings(dcfg, output):
+    """Return the raw list of DefectDojo finding dicts — from a captured envelope
+    (--defectdojo-output; dry run, no network, no token) or by paging the live REST
+    API via the `next` link until exhausted. Raises DefectDojoError on a bad file, a
+    missing base_url/token, or an API failure (the caller degrades with a loud log)."""
+    if output:
+        _log(f"[defectdojo] reading captured findings envelope {output} "
+             "(dry run; no network, no token)")
+        raw = _read_defectdojo_json(output)
+        envelopes = raw if isinstance(raw, list) else [raw]
+        findings = []
+        for env in envelopes:
+            if isinstance(env, dict):
+                findings.extend(env.get("results") or [])
+        return findings
+
+    base_url = str(dcfg.get("base_url", "")).strip().rstrip("/")
+    if not base_url:
+        raise DefectDojoError("[defectdojo].base_url is not set")
+    token = os.environ.get("VULNTRIAGE_DEFECTDOJO_TOKEN", "")
+    if not token:
+        raise DefectDojoError(
+            "VULNTRIAGE_DEFECTDOJO_TOKEN is unset — a read-only DefectDojo API token "
+            "is required (host env, never config/.env; DESIGN §14.3)")
+    query = urllib.parse.urlencode(_defectdojo_query_params(dcfg))
+    url = f"{base_url}/api/v2/findings/?{query}"
+    findings, pages = [], 0
+    while url and pages < MAX_DEFECTDOJO_PAGES:
+        doc = defectdojo_get(url, token)
+        findings.extend(doc.get("results") or [])
+        url = doc.get("next")
+        pages += 1
+    if url:
+        _log(f"[defectdojo] stopped at {MAX_DEFECTDOJO_PAGES}-page safety cap; some "
+             "findings not fetched — narrow scope in [defectdojo] (product/tags)")
+    _log(f"[defectdojo] fetched {len(findings)} finding(s) across {pages} page(s)")
+    return findings
+
+
+def collect_defectdojo(cfg, output=None):
+    """Return normalized DefectDojo findings (common schema), filtered to genuinely-
+    open findings (§14.4) and coarse-filtered by [defectdojo].severities (inheriting
+    [prowler].severities when unset — the §13.7-⑤ pattern). Empty list when disabled
+    and no captured output was given. Like Trivy, these carry CVEs, so cmd_collect
+    merges them BEFORE enrich(). A fetch failure degrades to the other collectors with
+    a LOUD log — NOT a silent empty (which would read as "0 findings = clean")."""
+    dcfg = cfg.get("defectdojo", {})
+    if not (output or _defectdojo_enabled(dcfg)):
+        return []
+    sev = dcfg.get("severities") or cfg.get("prowler", {}).get("severities", [])
+    wanted = [s.lower() for s in sev]
+    try:
+        raw_findings = _defectdojo_findings(dcfg, output)
+    except (DefectDojoError, OSError) as e:
+        _log(f"[defectdojo] fetch failed ({e}); DefectDojo findings absent this run "
+             "(degrading to the other collectors — this is NOT '0 findings = clean'). "
+             "Check VULNTRIAGE_DEFECTDOJO_TOKEN / [defectdojo].base_url / connectivity.")
+        return []
+
+    items, dropped_triaged = [], 0
+    for f in raw_findings:
+        if not isinstance(f, dict):
+            continue
+        if not _defectdojo_open(f):
+            dropped_triaged += 1
+            continue
+        it = normalize_defectdojo(f, str(f.get("product_name", "")).strip())
+        if it is None:
+            continue
+        # Keep unknown ('') severity rather than silently dropping it.
+        if wanted and it["severity"] and it["severity"] not in wanted:
+            continue
+        items.append(it)
+    _log(f"[defectdojo] {len(items)} open finding(s) after triage-state + severity "
+         f"filter ({dropped_triaged} dropped as already-triaged/closed)")
     return items
 
 
@@ -1061,7 +1350,8 @@ def _status_allowed(rec, cfg):
 
 
 def cmd_collect(cfg, seen_path, prowler_bin, aws_profile, prowler_output,
-                include_seen=False, trivy_bin="trivy", trivy_output=None):
+                include_seen=False, trivy_bin="trivy", trivy_output=None,
+                defectdojo_output=None):
     seen = load_seen(seen_path)
 
     if prowler_output:
@@ -1089,6 +1379,14 @@ def cmd_collect(cfg, seen_path, prowler_bin, aws_profile, prowler_output,
     # from a captured `--trivy-output`. Otherwise (live Prowler run) collect Trivy live.
     if not (prowler_output and not trivy_output):
         for item in collect_trivy(cfg, trivy_bin, trivy_output):
+            by_id.setdefault(item["id"], item)
+    # Stage 3 (DESIGN §14): merge DefectDojo imported findings the same way, BEFORE
+    # enrich(), ids namespaced ("defectdojo|…") so they never collide. Same offline-
+    # replay guard as Trivy: a --prowler-output replay ("no AWS calls") must not trigger
+    # a live DefectDojo fetch either — only include DefectDojo findings from a captured
+    # --defectdojo-output. Otherwise (live run) import DefectDojo live.
+    if not (prowler_output and not defectdojo_output):
+        for item in collect_defectdojo(cfg, defectdojo_output):
             by_id.setdefault(item["id"], item)
     items = list(by_id.values())
     _log(f"[collect] {len(items)} finding(s) after status/severity filter "
@@ -1235,6 +1533,11 @@ def main():
         help="Read this captured Trivy JSON report file instead of scanning images "
              "(read-only dry run; no pull, no AWS). Merges its CVE findings alongside "
              "Prowler's. See DESIGN §13.")
+    p_collect.add_argument(
+        "--defectdojo-output", default=None,
+        help="Read this captured DefectDojo /api/v2/findings/ JSON envelope instead of "
+             "querying a live instance (read-only dry run; no network, no token). Merges "
+             "its imported findings alongside the others. See DESIGN §14.")
     p_mark = sub.add_parser("mark")
     p_mark.add_argument("ids", nargs="+")
     sub.add_parser("seen-count")
@@ -1257,7 +1560,8 @@ def main():
         try:
             cmd_collect(cfg, args.state, prowler_bin, aws_profile, args.prowler_output,
                         include_seen=args.include_seen, trivy_bin=trivy_bin,
-                        trivy_output=args.trivy_output)
+                        trivy_output=args.trivy_output,
+                        defectdojo_output=args.defectdojo_output)
         except ValueError as exc:
             # A collector config error (e.g. the ecr_discovery fail-loud) — abort with a
             # clean operator-facing message and a non-zero exit so run.py stops the run,
