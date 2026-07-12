@@ -196,6 +196,43 @@ enrichment + floor pipeline and does not touch the B2 or read-only guarantees.
   §13.7. Operator setup runbook: README "Appendix — enabling Stage 3 Trivy"; design +
   validation: `DESIGN.md` §13.
 
+## Stage 3 — DefectDojo import collector (opt-in, off by default)
+
+When `[defectdojo].enabled = true` (or the non-secret env toggle
+`VULNTRIAGE_DEFECTDOJO_ENABLED=true`), the collector adds a **third source** — but a
+different *class* of one. Prowler and Trivy are scanners the harness **runs**; DefectDojo is a
+vulnerability **system of record** the harness **imports from**. Its CVEs merge into the
+*existing* enrich + floor pipeline and touch neither the B2 nor the read-only guarantee.
+
+- **Import, not scan — one integration, N scanners.** DefectDojo aggregates findings from
+  many upstream scanners (Prowler, Trivy, Snyk, Nessus, …) plus manual entries. The collector
+  issues authenticated `GET /api/v2/findings/` (`defectdojo_get()`, `Authorization: Token`
+  header, bounded retry, **401/403 fail-fast** as `DefectDojoError`) with `next`-link
+  pagination, and normalizes each result to the **same common finding schema**
+  (`normalize_defectdojo()` via `make_finding()`) so `enrich()` / the floor / digest /
+  evidence / ledger consume it unchanged. `cmd_collect` merges DefectDojo items **before**
+  `enrich()`. Ids are namespaced (`defectdojo|<finding.id>`) — DefectDojo's own integer id is
+  already deduplicated by its engine, making it the most robust dedup key of the three sources.
+- **Read, not write.** The harness only GETs. Verdict write-back (pushing machine triage back
+  into DefectDojo) is a **separate, deferred, opt-in** follow-on (S3.4b) — it would be the
+  first write outside Discord/ledger/evidence and is Stage-4-adjacent (`DESIGN.md` §14.2).
+- **Honors human triage (hard requirement).** `_defectdojo_open()` drops findings the org has
+  already dispositioned — false_p / duplicate / is_mitigated / out_of_scope / risk_accepted /
+  inactive — so the harness never re-surfaces work already triaged. Only genuinely open,
+  un-triaged findings import.
+- **CVEs from structured fields only.** CVEs come from `vulnerability_ids[]` (+ legacy `cve`),
+  **not** from the free-text description — because DefectDojo's description aggregates arbitrary
+  upstream scanners and manual notes and is the most untrusted free text of the three sources;
+  a CVE mentioned in prose must not be promoted into KEV/EPSS/floor input (indirect-PI vector).
+  DefectDojo's own EPSS/severity intel is ignored; the harness re-derives KEV/EPSS so the floor
+  keys off a single authoritative source.
+- **Loud graceful degrade.** DefectDojo off, unreachable, missing/wrong token, or unset
+  `base_url` → the collector logs *why* and continues with the other collectors — never a
+  crash, never a silent empty that reads as "0 findings = clean."
+- **Untrusted DATA (B2).** Imported advisory text is fenced as DATA for the tool-less LLM,
+  never interpreted. Operator setup runbook: README "Appendix — enabling Stage 3 DefectDojo";
+  design + validation: `DESIGN.md` §14.
+
 ## Data feeds / terms
 
 CVE enrichment uses free public feeds via their public APIs — **CISA KEV** (catalog

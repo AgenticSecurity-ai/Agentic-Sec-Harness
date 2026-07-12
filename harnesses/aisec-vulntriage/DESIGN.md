@@ -375,7 +375,9 @@ the cross-harness session log; this checklist is the vulntriage-specific roadmap
      config default off + `VULNTRIAGE_DEFECTDOJO_ENABLED` toggle + `--defectdojo-output`
      dry-run, `SOURCES` row; offline captured-envelope gate PASS — KEV/EPSS fires,
      human-triaged findings dropped, dedup idempotent, three-collector merge clean).
-     Live verification (S3.4.2) + docs (S3.4.3) remain. The *write-back* direction §8.3
+     **S3.4.3 docs ✅** (README "Appendix — enabling Stage 3 DefectDojo" incl. read-only-token
+     note + write-back deferral, SKILL "Stage 3" DefectDojo section, `.env.example`, this §8
+     sync). Only **live verification (S3.4.2)** remains. The *write-back* direction §8.3
      first named ("push signed verdicts") is split off as a deferred opt-in (S3.4b,
      §14.2) — it would be the first write outside Discord/ledger and is Stage-4-adjacent.
    - ⏳ **S3.5 Off-host signing** — Sigstore keyless + Rekor / KMS-delegated signing;
@@ -1289,9 +1291,12 @@ state blocks it:
   with no id collision (33-check unit suite + CLI runs).
 - **S3.4.2 Live verification** — throwaway/non-prod DefectDojo → CVE finding → KEV/EPSS →
   temp-ledger e2e → byte-identical restore; 401/403 fail-fast confirmed.
-- **S3.4.3 Config/docs distribution** — README "Appendix — enabling Stage 3 DefectDojo" (incl. the
-  read-only-token note + the write-back deferral), SKILL "Stage 3" section, `.env.example`, DESIGN
-  §8 roadmap sync.
+- **S3.4.3 Config/docs distribution — ✅ done.** README "Appendix — enabling Stage 3 DefectDojo"
+  (read-only view-only token provisioning, `VULNTRIAGE_DEFECTDOJO_TOKEN` host-env/cron `--command-env`
+  injection, `[defectdojo]` base_url/scope, `VULNTRIAGE_DEFECTDOJO_ENABLED` toggle,
+  `--defectdojo-output` dry-run, and the write-back deferral), SKILL "Stage 3 — DefectDojo import
+  collector" section, `.env.example` (`VULNTRIAGE_DEFECTDOJO_ENABLED` / `_TOKEN`), and this §8/§14.8
+  roadmap sync. Mirrors Trivy's S3.3.
 - **S3.4b Verdict write-back (deferred, opt-in)** — the **(W)** direction of §14.2: push signed
   machine-triage to a finding's notes/tags via a *separate write-scoped* token, default off,
   never overwriting human triage. Documented as the point where the read-only surface would widen;

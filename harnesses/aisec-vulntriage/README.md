@@ -364,7 +364,15 @@ a CSPM scanner whose misconfig findings rarely carry a CVE, so the KEV/EPSS enri
 usually has nothing to score; Trivy findings *are* CVEs and feed that same enrichment +
 priority-floor pipeline unchanged. Also off by default, read-only, B2-preserving; see
 [Appendix — enabling Stage 3 Trivy](#appendix--enabling-stage-3-trivy-imagepackage-cves).
-Still deliberately deferred (documented, not built): DefectDojo system of record,
+**Stage 3 DefectDojo (system-of-record import) is also available as an opt-in add-on** —
+DefectDojo aggregates findings from many scanners (Prowler, Trivy, Snyk, Nessus, …), so the
+harness can **import** its open findings over one REST API instead of running each scanner:
+one integration, N sources. It is a **read, not a scan and not a write** (verdict write-back
+is a separate, deferred opt-in), it honors DefectDojo's own human triage state, and its CVEs
+flow through the same enrich + priority-floor pipeline. Off by default, read-only,
+B2-preserving; see
+[Appendix — enabling Stage 3 DefectDojo](#appendix--enabling-stage-3-defectdojo-system-of-record-import).
+Still deliberately deferred (documented, not built): DefectDojo **verdict write-back**,
 off-host signing (Sigstore Rekor / KMS), and — the hard line — **Phase 4–6 execution**
 (decide → apply → verify), which is where the architecture escalates beyond tool-less B2
 to gated agentic tool-calling. Full design, rationale, and roadmap: **`DESIGN.md`**.
@@ -640,6 +648,104 @@ The output JSON's Trivy items carry `"source": "trivy"`, their CVE ids, and — 
 EPSS feeds run — `kev` / `epss` maps. When it looks right, your scheduled `run.py` merges
 Trivy findings alongside Prowler's automatically. A failed image pull is logged and skipped
 (that image retries next run); it never sinks the run.
+
+## Appendix — enabling Stage 3 DefectDojo (system-of-record import)
+
+**Optional and off by default.** Unlike Prowler and Trivy — scanners the harness *runs* —
+**DefectDojo** is a vulnerability **system of record** that aggregates findings from many
+scanners (Prowler, Trivy, Snyk, Nessus, …) plus manual entries. This collector **imports**
+its open findings over the REST API, so one integration covers **N sources** instead of
+wiring up each scanner. It is a **read, not a scan and not a write**: the harness only issues
+authenticated `GET /api/v2/findings/` — verdict write-back (pushing triage back into
+DefectDojo) is a **separate, deferred, opt-in** follow-on and is *not* part of this release
+(`DESIGN.md` §14.2). Every imported finding may carry a CVE, so these flow through the
+**same** normalize → enrich (KEV/EPSS/NVD) → priority-floor → digest → signed-evidence →
+dedup-ledger chain as Prowler and Trivy findings. It changes **nothing** about the security
+model: no subprocess and no tool is added to the LLM, and the imported advisory text — the
+**most** attacker-influenceable of the three sources, since it aggregates arbitrary upstream
+scanners and free-form manual notes — is fenced as untrusted DATA for the tool-less LLM.
+Design + validation: `DESIGN.md` §14.
+
+Two DefectDojo-specific behaviors worth knowing before you turn it on:
+
+- **It honors DefectDojo's own human triage.** A finding your team has marked
+  false-positive / risk-accepted / mitigated / duplicate / out-of-scope / inactive is
+  **dropped** — the harness never re-surfaces work your org already dispositioned. Only
+  genuinely open, un-triaged findings are imported.
+- **DefectDojo's own EPSS/severity intel is ignored**; the harness re-derives KEV/EPSS from
+  its own feeds so the priority floor always keys off a single authoritative source.
+
+**Prerequisites (beyond the base ones):**
+- A reachable **DefectDojo** instance and its base URL (non-secret).
+- A **read-only (view-only) DefectDojo API token**. Provision it against a view-only user so
+  the token *itself* cannot mutate — the read-only guarantee then holds by construction, the
+  same way the AWS read-only role does for Prowler. The token is a **secret**.
+
+### 1. Provision a read-only API token
+
+In DefectDojo, create (or reuse) a user with a **view-only** global role, then grab that
+user's API v2 token (**⚙ → API v2 Key**, or `POST /api/v2/api-token-auth/`). Because the user
+can only read, a fully-compromised harness still cannot change anything in DefectDojo — 401/403
+on any write is structural, not a code check.
+
+### 2. Give the harness the token (a secret, via the environment)
+
+```bash
+export VULNTRIAGE_DEFECTDOJO_TOKEN=<the-view-only-token>
+```
+
+This is a **secret** — it lives in the host environment / credential chain, **not** in `.env`
+(non-secret only, convention #3) and never in the repo. Export it in the same shell/service
+environment the cron job runs under; for the scheduled job, inject it with the cron
+`--command-env VULNTRIAGE_DEFECTDOJO_TOKEN=…` flag (exactly like the Neo4j password).
+
+### 3. Point at your instance and scope the import
+
+In `config.toml` `[defectdojo]`, set the base URL (the collector appends `/api/v2/findings/`)
+and, optionally, narrow the scope:
+
+```toml
+[defectdojo]
+base_url = "https://defectdojo.internal.example.com"
+# Optional scope (all non-secret) — omit to import across the whole instance:
+#   product_id = 42
+#   engagement_id = 7
+#   tags = ["prod", "external"]
+verified_only = false                # true = import only human-verified findings
+severities = ["critical", "high", "medium"]   # coarse pre-filter; inherits [prowler] if unset
+```
+
+The API **token** is never set here — only the non-secret base URL and scope.
+
+### 4. Turn DefectDojo on
+
+As with the graph and Trivy toggles, prefer **not** editing the shipped `enabled = false` if
+you track upstream: set the non-secret env var **`VULNTRIAGE_DEFECTDOJO_ENABLED=true`** in your
+deployment `.env` instead. It overrides the config default, so the committed file stays `false`
+(nothing to reconcile on `git pull`) — the same "deployment values live in `.env`" pattern as
+the channel id, graph, and Trivy toggles.
+
+### 5. Verify (read-only, no posting, no ledger writes)
+
+Dry-run the collector against a captured findings response, or scan live and inspect the JSON —
+no Discord, no ledger writes:
+
+```bash
+# capture your instance's open findings once, then feed the envelope in (no live API call):
+curl -s -H "Authorization: Token $VULNTRIAGE_DEFECTDOJO_TOKEN" \
+  "https://defectdojo.internal.example.com/api/v2/findings/?active=true&limit=100" \
+  > /tmp/dd.json
+python3 skills/aisec-vulntriage/collect.py collect \
+  --prowler-output /dev/stdin --defectdojo-output /tmp/dd.json <<< '[]'
+```
+
+The output JSON's DefectDojo items carry `"source": "defectdojo"`, the CVE ids extracted from
+each finding's `vulnerability_ids`, and — once the KEV/EPSS feeds run — `kev` / `epss` maps;
+human-triaged findings are absent (dropped by design). If DefectDojo is unreachable, the token
+is missing/wrong, or the base URL is unset, the collector **degrades loudly** — it logs *why*
+and continues with the other collectors rather than sinking the run or silently reporting
+"0 findings = clean." When it looks right, your scheduled `run.py` merges DefectDojo findings
+alongside Prowler's and Trivy's automatically.
 
 ## Layout
 
