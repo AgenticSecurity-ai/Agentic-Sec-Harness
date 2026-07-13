@@ -393,8 +393,12 @@ the cross-harness session log; this checklist is the vulntriage-specific roadmap
      (§15 — analyzes KMS-delegated vs Sigstore keyless+Rekor; **decision: KMS-delegated
      ships first** for this deployment class — unattended cron, already in AWS, verification
      stays offline/AWS-independent, stdlib-only via the `aws kms sign` CLI; a fourth
-     `_load_signer()` tier, default off, chain unchanged). **S3.5.1 KMS signer / S3.5.2 live
-     / S3.5.3 docs ⏳.** **Sigstore keyless + Rekor** = deferred higher-assurance, cloud-neutral
+     `_load_signer()` tier, default off, chain unchanged). **S3.5.1 KMS signer ✅**
+     (PR #40 — fourth tier, fail-closed, offline gate 11/11). **S3.5.2 live ✅** (§15.7-2 —
+     real throwaway KMS key + scoped signer role signed 3 entries; exported pubkey verified
+     them offline AWS-independently, tamper flip → ECDSA mismatch, CloudTrail recorded 3
+     `Sign` events under the *signer* role, live ledger byte-identical, key/role torn down).
+     **S3.5.3 docs ⏳.** **Sigstore keyless + Rekor** = deferred higher-assurance, cloud-neutral
      option (S3.5b) behind its OIDC-identity prerequisite.
 4. ⏳ **Phase 4–6 (execution)** — *this* is where the architecture escalates beyond B2:
    the tool-less orchestrator model gives way to **agentic tool_call** with tier-2
@@ -1524,13 +1528,29 @@ live log:
    shows the `Sign` events** (the off-host audit trail — the actual new property). Confirm the **live**
    evidence log is **byte-identical sha256** before/after. Tear down the throwaway key.
 
+**Live result (§15.7-2, verified).** Throwaway KMS key `ECC_NIST_P256`/`SIGN_VERIFY` + a scoped
+`aisec-vulntriage-signer` role (inline policy: `kms:Sign` + `kms:GetPublicKey` on that one key ARN,
+assumed via a `vulntriage-signer` named profile **separate from the read-only scan role** per §15.4 —
+the role could sign but got `UnauthorizedOperation` on `ec2:DescribeInstances`, proving the split).
+The harness's **unmodified** `evidence.EvidenceLog.append` (same record shape as `run.py`:575) signed 3
+verdicts against a temp log via real `aws kms sign` — entries carried `sig_alg="ECDSA-P256-SHA256-KMS"`
+with real DER sigs. `aws kms get-public-key` → PEM verified all 3 **offline with no AWS/KMS env**
+(`evidence.py verify ok=True checked=3`); a one-byte sig flip → `ECDSA signature mismatch at seq 1`
+(proving the check runs, not a no-op). **CloudTrail Event history showed 3 `Sign` events**
+(`signingAlgorithm=ECDSA_SHA_256`, `messageType=RAW`, no errorCode) attributed to the *signer* role —
+the off-host, host-breach-resistant audit trail. The **live** evidence log was untouched (temp-only
+writes; sha256 unchanged, 324 entries, `verify ok`). Throwaway key scheduled for deletion (7-day
+AWS-min window), role + profile removed, scan role intact. AWS CLI v2 was installed user-local
+(`~/.local/bin/aws`, no sudo) since the KMS tier shells out to it.
+
 ### 15.8 Sub-milestones
 
 - **S3.5.0 Design annex** — this §15.
-- **S3.5.1 KMS signer** — ⏳ the fourth `_load_signer()` tier (`_load_kms_signer()` via `aws kms sign`),
-  `verify()` ECDSA-public-key support, fail-closed-on-Sign-failure, `VULNTRIAGE_EVIDENCE_KMS_KEY_ID` /
-  `_KMS_PROFILE` / `_EC_PUBKEY` env, and the offline gate (§15.7-1). Default off; chain/schema unchanged.
-- **S3.5.2 Live verification** — ⏳ real throwaway KMS key, temp evidence log, offline pubkey verify,
+- **S3.5.1 KMS signer** — ✅ (PR #40) the fourth `_load_signer()` tier (`_load_kms_signer()` via
+  `aws kms sign`), `verify()` ECDSA-public-key support, fail-closed-on-Sign-failure,
+  `VULNTRIAGE_EVIDENCE_KMS_KEY_ID` / `_KMS_PROFILE` / `_EC_PUBKEY` env, and the offline gate (§15.7-1,
+  11/11). Default off; chain/schema unchanged.
+- **S3.5.2 Live verification** — ✅ (§15.7-2 above) real throwaway KMS key, temp evidence log, offline pubkey verify,
   CloudTrail off-host trail, byte-identical live-log restore (§15.7-2).
 - **S3.5.3 Config/docs distribution** — ⏳ README "Appendix — enabling Stage 3 off-host signing" (KMS
   key + scoped signing role provisioning, env/cron `--command-env` injection, public-key export for
