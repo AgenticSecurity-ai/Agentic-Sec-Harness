@@ -233,6 +233,41 @@ vulnerability **system of record** the harness **imports from**. Its CVEs merge 
   never interpreted. Operator setup runbook: README "Appendix — enabling Stage 3 DefectDojo";
   design + validation: `DESIGN.md` §14.
 
+## Stage 3 — off-host signing (opt-in, off by default)
+
+When `VULNTRIAGE_EVIDENCE_KMS_KEY_ID` names an AWS KMS asymmetric key, evidence signing moves
+**off the host** — closing the non-repudiation gap the local-PEM path documents (host compromise ⇒
+forged signature). This is **not a collector**: it adds no input source and no triage, it only
+swaps the signature backend in `evidence.py`. It touches neither the B2 boundary nor the read-only
+guarantee.
+
+- **A fourth signer tier, chain unchanged.** `_load_signer()` resolution order becomes
+  `KMS → local-PEM (ECDSA) → HMAC → none`; `_load_kms_signer()` wins when the key-id env is set,
+  else control falls through to the existing tiers **unchanged** (regression-safe). The
+  `entry_hash = SHA-256(seq\n ts\n prev_hash\n canonical(record))` chain and the entry schema are
+  identical — only the signature bytes' origin differs, and each entry self-describes its `sig_alg`,
+  so a **mixed** PEM+KMS log still chain-verifies end-to-end.
+- **KMS via CLI shell-out — stdlib kept.** `_kms_sign()` shells out to `aws kms sign
+  --message-type RAW --signing-algorithm ECDSA_SHA_256` on the hex `entry_hash` (byte-identical to
+  what the local signer feeds `key.sign(...)`), base64→DER→hex. No SDK dependency; the label is the
+  honest **`"ECDSA-P256-SHA256-KMS"`** — KMS is never dressed up as local, a downgrade never as KMS.
+- **Private key never leaves the HSM; every `Sign` is CloudTrail-logged.** Key-theft leg closed (the
+  key is unstealable); the residual gap — a host attacker holding the scoped credential can still sign
+  forged *new* entries while they hold it, though each is an off-host-logged call — is named, not
+  papered over. Closing even that is S3.5b (Sigstore keyless + Rekor), deferred (`DESIGN.md` §15.2).
+- **Credential separation (hard rule).** `kms:Sign` / `kms:GetPublicKey` are isolated to a **separate**
+  credential (`VULNTRIAGE_EVIDENCE_KMS_PROFILE`) scoped to exactly those two actions on the single key
+  ARN — the read-only scan role stays pure read-only, never gaining signing power (`DESIGN.md` §15.4).
+- **Verification stays offline / AWS-independent.** `verify()` checks each `ECDSA-P256-SHA256*` sig
+  against a public-key PEM (`VULNTRIAGE_EVIDENCE_EC_PUBKEY`, exported once via `aws kms get-public-key`)
+  with `cryptography` — no AWS access, forever. So signing needs KMS; auditing does not (`DESIGN.md` §15.3).
+- **Fail-closed, not silent-downgrade.** A configured `Sign` that fails does bounded retry then
+  **raises**; because `run.py` signs *before* it posts or marks, the abort precedes any Discord post
+  and any ledger `mark` — nothing posted, nothing marked, findings retry next run (`DESIGN.md` §15.5).
+  This is the opposite posture from a *collector* failure's loud degrade: evidence integrity is the
+  core product, so it fails closed. Operator setup runbook: README "Appendix — enabling Stage 3
+  off-host signing"; design + validation: `DESIGN.md` §15.
+
 ## Data feeds / terms
 
 CVE enrichment uses free public feeds via their public APIs — **CISA KEV** (catalog

@@ -323,11 +323,15 @@ Keep the key with your **host's other secrets — never in this directory** (con
 > **⚠ Limit of the local-PEM path — do not over-trust it.** A key on this host means
 > **host compromise ⇒ signature forgery**: an attacker who steals the key can rewrite
 > the log and re-sign it, and the signature then proves nothing *against that
-> attacker*. So v1 signing raises the bar for outsiders and gives honest operators
+> attacker*. So local-PEM signing raises the bar for outsiders and gives honest operators
 > tamper-evidence — but it is **not** non-repudiation against a host-level breach.
-> True non-repudiation requires an off-host signing authority (**AWS KMS**, or
-> **Sigstore keyless + a Rekor** transparency log) — the **roadmap stage-3** target,
-> not shipped in v1. See `DESIGN.md` §3.5 / §8.
+> True non-repudiation requires an **off-host signing authority** — and that is now
+> available as an opt-in add-on: **AWS KMS-delegated signing** (the private key never
+> leaves the HSM and every `Sign` is logged off-host in CloudTrail), enabled via
+> `VULNTRIAGE_EVIDENCE_KMS_KEY_ID` and covered in
+> [Appendix — enabling Stage 3 off-host signing](#appendix--enabling-stage-3-off-host-signing-aws-kms).
+> A **Sigstore keyless + Rekor** path (cloud-neutral, operator-can't-silently-rewrite)
+> remains deferred. See `DESIGN.md` §3.5 / §15.
 
 ## How it stays idempotent
 
@@ -372,9 +376,19 @@ is a separate, deferred opt-in), it honors DefectDojo's own human triage state, 
 flow through the same enrich + priority-floor pipeline. Off by default, read-only,
 B2-preserving; see
 [Appendix — enabling Stage 3 DefectDojo](#appendix--enabling-stage-3-defectdojo-system-of-record-import).
+**Stage 3 off-host signing (AWS KMS) is also available as an opt-in add-on** — the local-PEM
+evidence signature is forgeable under host compromise (a stolen key rewrites and re-signs the log),
+so this moves the signing authority **off the host**: an AWS KMS asymmetric key whose private half
+never leaves the HSM signs each verdict, and every `Sign` is logged off-host in CloudTrail. It is a
+drop-in **fourth signer tier** (`KMS → local-PEM → HMAC → none`) — the hash chain, entry schema, and
+`verify()` are unchanged, verification stays **offline and AWS-independent** (export the public key
+once), and signing **fails closed** (a KMS error aborts before any post or ledger write, never a
+silent downgrade). Off by default, read-only, B2-preserving; see
+[Appendix — enabling Stage 3 off-host signing](#appendix--enabling-stage-3-off-host-signing-aws-kms).
 Still deliberately deferred (documented, not built): DefectDojo **verdict write-back**,
-off-host signing (Sigstore Rekor / KMS), and — the hard line — **Phase 4–6 execution**
-(decide → apply → verify), which is where the architecture escalates beyond tool-less B2
+**Sigstore keyless + Rekor** signing (the cloud-neutral, operator-can't-silently-rewrite path — it
+needs a machine OIDC identity an unattended cron host lacks), and — the hard line — **Phase 4–6
+execution** (decide → apply → verify), which is where the architecture escalates beyond tool-less B2
 to gated agentic tool-calling. Full design, rationale, and roadmap: **`DESIGN.md`**.
 
 ## Appendix — provisioning the read-only role
@@ -746,6 +760,150 @@ is missing/wrong, or the base URL is unset, the collector **degrades loudly** �
 and continues with the other collectors rather than sinking the run or silently reporting
 "0 findings = clean." When it looks right, your scheduled `run.py` merges DefectDojo findings
 alongside Prowler's and Trivy's automatically.
+
+## Appendix — enabling Stage 3 off-host signing (AWS KMS)
+
+**Optional and off by default.** The evidence log (previous section) is always hash-chained and
+tamper-evident with no key. The optional **local-PEM** signature adds non-repudiation *against
+outsiders* — but a key file on this host means **host compromise ⇒ signature forgery** (an attacker
+who steals the PEM rewrites the log and re-signs it). Off-host signing closes that leg: an **AWS KMS
+asymmetric key** signs each verdict, the **private key never leaves the KMS HSM** (unstealable), and
+**every `Sign` call is logged off-host in CloudTrail** — an audit trail a host-level breach cannot
+erase. It is a drop-in **fourth signer tier**: resolution order becomes `KMS → local-PEM → HMAC →
+none`, and the hash chain, entry schema, and `evidence.py verify` are all unchanged (a log can even
+mix PEM- and KMS-signed entries and still verify end-to-end). It changes **nothing** about the
+security model: signing lives entirely in the deterministic orchestrator (`evidence.py`), adds **no
+untrusted input**, and `kms:Sign` mutates no account infrastructure. Design + validation: `DESIGN.md`
+§15.
+
+Two properties to keep straight before you turn it on:
+
+- **Verification stays offline and AWS-independent.** Signing needs KMS reach; *verifying* does not.
+  Export the public key once (`aws kms get-public-key`) and any third party checks every signature
+  with no AWS access, forever — so a KMS-signed log is not locked to AWS (`DESIGN.md` §15.3).
+- **Signing fails closed — never a silent downgrade.** If KMS is configured and a `Sign` fails (no
+  reach, throttle, `AccessDenied`), the signer does bounded retry then **aborts the run** — it does
+  **not** quietly write `sig_alg=none`. Because `run.py` signs into the evidence log *before* it posts
+  or marks the ledger, that abort happens before any Discord post and any `mark`: nothing is posted,
+  nothing is lost, the findings retry next run (`DESIGN.md` §15.5).
+
+**Prerequisites (beyond the base ones):**
+- **AWS CLI v2** on the host — the KMS tier shells out to `aws kms sign` (stdlib-only Python is kept;
+  the CLI does the KMS call). Install user-local if you lack sudo (e.g. to `~/.local/bin/aws`).
+- The **`cryptography`** package, only for `evidence.py verify` to check ECDSA signatures offline
+  (signing itself needs only the AWS CLI). Without it, KMS-signed entries still chain-verify; the
+  signatures just aren't cryptographically checked.
+- Permission to create a KMS key and a small scoped IAM role/profile in the account you already scan.
+
+### 1. Create a KMS asymmetric signing key
+
+```bash
+aws kms create-key --key-usage SIGN_VERIFY --key-spec ECC_NIST_P256 \
+  --description "aisec-vulntriage evidence signing" --query 'KeyMetadata.Arn' --output text
+# (optional) give it a friendly alias:
+aws kms create-alias --alias-name alias/aisec-vulntriage-evidence \
+  --target-key-id <the-key-arn-above>
+```
+
+The key **spec must be `ECC_NIST_P256`** — it matches the harness's `ECDSA-P256-SHA256` chain, so a
+KMS-signed entry and a local-PEM entry verify through the **same** code path. The **key ARN is
+non-secret** (there is no private key to place — that is the whole point): it goes in the environment,
+not the repo (convention #3).
+
+### 2. Scope a signing credential — separate from the read-only scan role (REQUIRED)
+
+`kms:Sign` / `kms:GetPublicKey` are **not** in `SecurityAudit` / `ViewOnlyAccess`, and they must
+**not** be added to your `vulntriage-readonly` scan role. **Hard rule: signing uses a different
+credential from scanning** (`DESIGN.md` §15.4). Create a dedicated role scoped to *exactly* those two
+actions on the *single* key ARN, assumable by your admin principal:
+
+```bash
+SIGNER=aisec-vulntriage-signer
+KEY_ARN=<the-key-arn-from-step-1>
+
+cat > signer-trust.json <<JSON
+{ "Version": "2012-10-17",
+  "Statement": [{ "Effect": "Allow",
+    "Principal": { "AWS": "arn:aws:iam::<ACCOUNT_ID>:user/<your-admin-principal>" },
+    "Action": "sts:AssumeRole" }] }
+JSON
+
+cat > signer-policy.json <<JSON
+{ "Version": "2012-10-17",
+  "Statement": [{ "Effect": "Allow",
+    "Action": ["kms:Sign", "kms:GetPublicKey"],
+    "Resource": "$KEY_ARN" }] }
+JSON
+
+aws iam create-role --role-name "$SIGNER" \
+  --assume-role-policy-document file://signer-trust.json \
+  --description "Off-host evidence signing for aisec-vulntriage (kms:Sign on one key)"
+aws iam put-role-policy --role-name "$SIGNER" \
+  --policy-name kms-sign-one-key --policy-document file://signer-policy.json
+```
+
+Wire it as its own named profile in `~/.aws/config` (**distinct** from `vulntriage-readonly`):
+
+```ini
+[profile vulntriage-signer]
+role_arn = arn:aws:iam::<ACCOUNT_ID>:role/aisec-vulntriage-signer
+source_profile = default
+region = us-east-1
+```
+
+The split is the point: this credential can sign but can read nothing, and the scan role can read but
+cannot sign. (In live verification the signer role got `UnauthorizedOperation` on
+`ec2:DescribeInstances`, confirming the separation — `DESIGN.md` §15.7-2.)
+
+### 3. Point the harness at the key (non-secret env)
+
+```bash
+export VULNTRIAGE_EVIDENCE_KMS_KEY_ID=<the-key-arn-or-alias>   # non-secret
+export VULNTRIAGE_EVIDENCE_KMS_PROFILE=vulntriage-signer        # separate from the scan profile
+# optional: export VULNTRIAGE_EVIDENCE_KMS_REGION=us-east-1     # else parsed from the key ARN
+```
+
+These are **non-secret** (a key ARN and a profile name), so they may live in your deployment `.env`.
+There is **no private-key file** anywhere — the whole benefit is that the secret material stays in
+KMS. When `VULNTRIAGE_EVIDENCE_KMS_KEY_ID` is set, the KMS tier wins over any local PEM / HMAC.
+
+### 4. Export the public key for offline verification
+
+```bash
+aws kms get-public-key --key-id "$VULNTRIAGE_EVIDENCE_KMS_KEY_ID" \
+  --query PublicKey --output text | base64 -d | \
+  openssl pkey -pubin -inform DER -out ~/.secrets/vulntriage-evidence-pub.pem
+export VULNTRIAGE_EVIDENCE_EC_PUBKEY=~/.secrets/vulntriage-evidence-pub.pem
+```
+
+Distribute that public PEM to anyone who audits the log. `evidence.py verify` uses it (with
+`cryptography`) to check every `ECDSA-P256-SHA256*` signature — KMS or local — **with no AWS access**.
+
+### 5. Turn it on for the scheduled run
+
+Signing is enabled simply by the key-id env being present. For cron, inject the two non-secret vars
+(and the pubkey path) with `--command-env`, exactly like the Neo4j password / DefectDojo token:
+
+```bash
+openclaw cron edit <job-id> \
+  --command-env VULNTRIAGE_EVIDENCE_KMS_KEY_ID=<key-arn> \
+  --command-env VULNTRIAGE_EVIDENCE_KMS_PROFILE=vulntriage-signer
+```
+
+From now on every verdict is KMS-signed with `sig_alg="ECDSA-P256-SHA256-KMS"` (the honest label — a
+downgrade is never dressed up as KMS, and KMS is never dressed up as local).
+
+### 6. Verify (offline, no AWS needed)
+
+```bash
+python3 skills/aisec-vulntriage/evidence.py verify state/evidence.log
+```
+
+With `VULNTRIAGE_EVIDENCE_EC_PUBKEY` set and `cryptography` installed, this re-checks the hash chain
+**and** validates each ECDSA signature against the exported public key — offline, no AWS. Tampering
+with any signed entry yields `ECDSA signature mismatch`. Cross-check that the `Sign` calls really went
+off-host by looking at **CloudTrail** (Event history → `Sign` events on your key, attributed to the
+signer role) — that off-host log is the property host-local PEM signing cannot give you.
 
 ## Layout
 
