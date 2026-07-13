@@ -355,6 +355,12 @@ the cross-harness session log; this checklist is the vulntriage-specific roadmap
      mode on without a config-drift edit `git pull` would revert (PR #27); live cron
      `vulntriage-weekday` cut over to graph mode with the Neo4j password injected via
      `--command-env`, smoke-verified then enabled. **Graph mode is live.**
+   - ✅ **S2.6 True reachability** — `graph_facts()` step 3c deepens `blast_radius` from the
+     wildcard-privilege proxy into true reachability using Cartography's opt-in
+     `permission_relationships` edges (`CAN_PASS_ROLE`/`CAN_READ`/`GET_SECRET`/…);
+     `graph_over_privileged` now also fires on an `iam:PassRole` escalation path with no
+     wildcard statement. Self-activating on edge presence (no new config), degrades to the
+     proxy when absent. Offline 19/19 + live 2-leg on the real graph. Detailed in **§12.12**.
 3. ✅ **+ More collectors & audit-grade evidence** — three independent tracks, all shipped:
    **Trivy** (image/package CVEs), **DefectDojo** (system of record), and **off-host signing**
    (KMS-delegated; Sigstore keyless + Rekor deferred to S3.5b) to move evidence signing off the host — the
@@ -719,7 +725,8 @@ and in this sync **EC2 instances carry no instance-profile→role edge**, so a c
 resource can't be walked to its privileges. Deepening blast-radius means enabling the
 permission-relationships mapping (which needs **no extra IAM** — it is computed from
 already-synced policy data) and, for compute, the instance-profile edge. `admin_like` is the
-honest v1 signal; record the depth ceiling rather than overclaim a path.
+honest v1 signal; record the depth ceiling rather than overclaim a path. **(Both resolved:
+the instance-profile edge in §12.11, the permission-relationships depth in §12.12.)**
 
 ### 12.10 S2.3 wiring — graph facts into triage (2026-07-04)
 
@@ -838,6 +845,70 @@ instance's **real** inherited over-privilege + **real** KEV and toggling exposur
 `floor_priority` `Low→Critical`, exercising the toxic combination end-to-end. The
 instance-profile→role edge needed neither an opt-in analysis job nor `permission_relationships` — it
 came from the normal sync, exactly as §12.10 predicted.
+
+### 12.12 True reachability — deepening blast-radius past the wildcard proxy (2026-07-13)
+
+The follow-up flagged in §12.9 (and deferred in §12.10 as "not required for the toxic floor") is now
+implemented. Until here, `blast_radius` was a **wildcard-privilege proxy**: it counted `*` / `service:*`
+Allow statements on a principal as a stand-in for over-privilege (§12.8). That proxy is blind to a whole
+class of over-privilege — a principal with **no** wildcard statement that nonetheless holds a concrete,
+dangerous permission on many resources. Cartography's opt-in `permission_relationships` module fills
+exactly this gap: fed a mapping file (`--permission-relationships-file`), it evaluates IAM policies and
+writes **typed** edges from a principal to the concrete resources it can reach.
+
+**What the real edges look like (measured before coding — S2.1's "look at the data first" rule).** The
+default mapping produces `(:AWSRole|:AWSUser)-[:CAN_*|:GET_SECRET]->(resource)`, NOT a single generic
+`CAN_ACCESS`: `CAN_READ` / `CAN_WRITE` → `S3Bucket`, `GET_SECRET` → `SecretsManagerSecret`,
+`CAN_PASS_ROLE` → `AWSRole`, `CAN_EXEC` → `CloudFormationStack` (plus `CAN_QUERY`/`CAN_ADMINISTER` for
+DynamoDB/RDS/Redshift and `CAN_EXECUTE_COMMAND` for ECS where those resources exist). A default sync
+writes **none** of these; on account 278059980943 the live graph had zero permission edges until the
+opt-in sync was run — confirming §12.9. **No extra IAM** is needed — the edges are computed from
+already-synced policy data (validating the §12.9 note).
+
+**Implementation** (`graph_facts()` step **3c**, `collect.py`):
+- For the same principal ARN set as the 3b proxy, two cheap aggregations: per-capability distinct-target
+  counts (`by_rel`, e.g. `{CAN_PASS_ROLE: 38}`) and a **de-duplicated** resource `total` (a bucket
+  reachable by both `CAN_READ` and `CAN_WRITE` counts once — `full_access` has 13+13 by_rel but total 85,
+  not double-counted).
+- The reach fact is attached onto the 3b rows so `_blast_from_rows` folds it into a `reachable` block
+  **alongside** the proxy — including inheritance across the §12.11 EC2→role bridge (an exposed instance
+  inherits its role's reachability, worst-case union over multiple roles).
+- `graph_over_privileged()` gains a second sufficient signal: **`iam:PassRole` reachability**
+  (`reachable.can_pass_role`) is a documented privilege-escalation primitive, so a principal that can pass
+  roles is over-privileged **even with no wildcard statement**. The wildcard proxy remains the always-on
+  v1 signal; reachability only strengthens it.
+
+**Self-activating, zero new config, zero v1 impact.** Reachability keys entirely on edge *presence*: no
+`--permission-relationships-file` in the operator's sync ⇒ no edges ⇒ nothing attached ⇒ the wildcard
+proxy stands exactly as before. There is deliberately **no** `[graph]` flag for it — like the EC2 bridge,
+it lights up when the data supports it and degrades silently when it doesn't. (Consequence: an operator
+who wants reachability must add the mapping flag to their **recurring** Cartography sync; a plain re-sync
+removes the edges and the harness reverts to the proxy — graceful, never wrong.) `can_read_secret` and the
+`total`/`by_rel` breadth are recorded in the signed evidence and shown to the LLM, but do **not** by
+themselves raise the floor — only the crisp `can_pass_role` escalation path does. A breadth threshold
+(flag over-privilege at N reachable resources) is a future tuning knob, intentionally not taken here to
+keep the floor conservative.
+
+**Why `can_pass_role` and not "any reachability" (measured, non-noisy).** Of 71 role/user principals in
+the account, folding `can_pass_role` into over-privilege newly flags **exactly 2** — the
+`BedrockAPIKey-u7ba`/`-msou` users, each able to pass **38** roles with **no** wildcard statement (the
+proxy scored them clean). The other 54 non-wildcard principals have no pass-role edge and are untouched;
+the 12 wildcard principals that could also pass roles were already flagged. So the deepening catches real
+privilege-escalation paths without over-firing.
+
+**Verification.** Offline synthetic-graph test (19 checks, all pass): a no-wildcard `CAN_PASS_ROLE`
+principal → `reachable.can_pass_role=True` → over-privileged (**the gap closed**); a read-only-breadth
+(`CAN_READ` only) principal → reachability recorded but **not** over-privileged; a wildcard principal →
+proxy fires with `reachable` **absent** (regression); a principal with no edges → byte-identical to
+pre-change (`reachable` absent, over-priv False); an exposed EC2 inheriting a pass-role role via the
+bridge → `exposed ∧ reachability-over-priv ∧ KEV` → **Critical**, while the same finding *without* the
+permission edges floors only to High. **Live 2-leg confirmation (2026-07-13, real account 278059980943),
+via the harness's own `graph_facts()` HTTP Cypher over the real graph after an opt-in sync:** *leg 1* —
+`full_access` resolves `reachable.total=85` with real per-capability counts, `BedrockAPIKey-u7ba` resolves
+`total=38` (`CAN_PASS_ROLE` only); *leg 2* — `BedrockAPIKey-u7ba` has `admin_like=False` (no wildcard) yet
+`graph_over_privileged=True` **purely via reachability** (the wildcard proxy missed it), `full_access`
+still fires via the proxy (regression), and the read-only role carries no `reachable` block and is **not**
+over-flagged. The live ledger/evidence were untouched (read-only queries only).
 
 ## 13. Stage 3 design annex — Trivy collector (image/package CVEs)
 

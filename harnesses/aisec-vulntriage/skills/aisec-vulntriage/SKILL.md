@@ -157,7 +157,11 @@ guarantees.
   inheriting the blast-radius of the role it assumes, walked over the
   `EC2Instance → AWSInstanceProfile → AWSRole` bridge; and a graph-confirmed **toxic
   combination** (exposure ∧ over-privilege ∧ KEV/high-EPSS on one finding) floors that
-  finding's priority to **Critical**.
+  finding's priority to **Critical**. If the operator enables Cartography's opt-in
+  `permission_relationships` edges, `blast_radius` deepens from that wildcard *proxy* into
+  true reachability — a principal that can `iam:PassRole` is flagged over-privileged even
+  with no wildcard statement (self-activates on edge presence; degrades to the proxy without
+  them). See `DESIGN.md` §12.12.
 - **Graceful degrade — same contract as a down intel feed.** If `[graph].enabled` is off,
   `VULNTRIAGE_NEO4J_PASSWORD` is unset, Neo4j is unreachable, or a finding doesn't join a
   node, that finding falls back to the keyword exposure flag and simply gains no graph

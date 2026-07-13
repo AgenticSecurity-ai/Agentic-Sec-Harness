@@ -549,6 +549,17 @@ back up. **Re-run this sync before each triage run** (or on its own schedule) so
 reflects current topology; a stale graph only yields stale *facts*, never a wrong action
 (the harness is read-only regardless).
 
+> **Optional — deeper over-privilege (true reachability).** By default `blast_radius` uses a
+> *wildcard-privilege proxy* (counting `*` / `service:*` statements). Add
+> `--permission-relationships-file <cartography>/data/permission_relationships.yaml` to the
+> sync command above and Cartography evaluates IAM policies into typed reachability edges
+> (`CAN_PASS_ROLE`, `GET_SECRET`, `CAN_READ`, …). The harness then flags a principal that can
+> `iam:PassRole` (a privilege-escalation path) as over-privileged **even with no wildcard
+> statement**. This needs **no extra IAM** (it is computed from already-synced policy data)
+> and **no harness config** — it self-activates when the edges are present. Because it keys on
+> edge presence, add the flag to your **recurring** sync: a plain re-sync without it removes
+> the edges and the harness silently reverts to the proxy (graceful, never wrong).
+
 ### 4. Turn the graph on
 
 In `config.toml`:
