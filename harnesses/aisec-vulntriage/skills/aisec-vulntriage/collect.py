@@ -1113,6 +1113,17 @@ OPEN_CIDR = "0.0.0.0/0"
 # rather than being wrongly cleared to False.
 EXPOSURE_MODELED_LABELS = {"EC2Instance", "EC2SecurityGroup", "S3Bucket"}
 
+# Cartography permission-relationship edge types, written by the OPT-IN
+# `--permission-relationships-file` sync (DESIGN §12.12). They carry TRUE reachability —
+# which concrete resources a principal can reach and via which capability — turning
+# blast-radius from a wildcard-privilege GUESS into a fact. A default sync writes none of
+# these, so reachability self-activates only where the deployer enabled the mapping; absent
+# edges leave the wildcard proxy standing alone (no config flag, no behaviour change for v1).
+# `CAN_PASS_ROLE` (iam:PassRole) is the privilege-escalation primitive we key over-privilege
+# on: a principal that can pass 38 roles is over-privileged even with no `*` statement.
+PERMISSION_RELS = ["CAN_READ", "CAN_WRITE", "CAN_QUERY", "GET_SECRET",
+                   "CAN_ADMINISTER", "CAN_PASS_ROLE", "CAN_EXEC", "CAN_EXECUTE_COMMAND"]
+
 
 def graph_key(resource_uid):
     """Return (arn, fallback_id) join keys for a Prowler resource uid, per the S2.1
@@ -1138,13 +1149,28 @@ def _blast_from_rows(rows):
     """Aggregate the wildcard-privilege proxy over one or more IAM-principal rows into a
     single blast_radius dict. More than one row occurs when an EC2 instance assumes
     multiple roles (§12.10 bridge); the finding inherits the WORST case — admin_like if
-    ANY role is, and the max wildcard-statement counts."""
-    return {
+    ANY role is, and the max wildcard-statement counts. When the opt-in permission edges
+    are present (§12.12), each row also carries a `reach` sub-fact; it is folded into a
+    `reachable` block (worst-case union: any-of the escalation booleans, max of the counts)."""
+    out = {
         "admin_like": any((r.get("star") or 0) > 0 for r in rows),
         "star_action_stmts": max((r.get("star") or 0) for r in rows),
         "wildcard_service_stmts": max((r.get("wild") or 0) for r in rows),
         "allow_stmt_count": max((r.get("allow") or 0) for r in rows),
     }
+    reach_rows = [r["reach"] for r in rows if r.get("reach")]
+    if reach_rows:
+        by_rel = {}
+        for rr in reach_rows:
+            for rel, n in rr["by_rel"].items():
+                by_rel[rel] = max(by_rel.get(rel, 0), n)
+        out["reachable"] = {
+            "total": max(rr["total"] for rr in reach_rows),
+            "by_rel": by_rel,
+            "can_pass_role": by_rel.get("CAN_PASS_ROLE", 0) > 0,
+            "can_read_secret": by_rel.get("GET_SECRET", 0) > 0,
+        }
+    return out
 
 
 def graph_facts(graph_cfg, password, findings):
@@ -1205,11 +1231,11 @@ def graph_facts(graph_cfg, password, findings):
         "WITH iid, collect(DISTINCT r1.arn) + collect(DISTINCT r2.arn) AS ras "
         "RETURN iid AS key, [x IN ras WHERE x IS NOT NULL] AS role_arns", ids=ids)}
 
-    # 3b) blast radius — for resources that ARE an IAM principal (role/user). Without
-    # the opt-in permission_relationships mapping the graph has no CAN_ACCESS edges to
-    # specific resources, so we use the strongest available proxy: wildcard-privilege
-    # policy statements attached to the principal (DESIGN §12.8 records this limit). The
-    # keyed arn set spans both finding-owned principals AND EC2-attached roles (3a).
+    # 3b) blast radius — for resources that ARE an IAM principal (role/user). The always-on
+    # proxy: wildcard-privilege policy statements attached to the principal (DESIGN §12.8).
+    # This is the honest v1 signal available from any sync; 3c below deepens it into true
+    # reachability WHEN the opt-in permission edges are present. The keyed arn set spans both
+    # finding-owned principals AND EC2-attached roles (3a).
     role_arns = {ra for lst in ec2_roles.values() for ra in lst}
     blast_arns = sorted(set(arns) | role_arns)
     blast = {r["key"]: r for r in q(
@@ -1220,6 +1246,29 @@ def graph_facts(graph_cfg, password, findings):
         "size([x IN ss WHERE any(act IN x.action WHERE act='*')]) AS star, "
         "size([x IN ss WHERE any(act IN x.action WHERE act ENDS WITH ':*')]) AS wild, "
         "size(ss) AS allow", arns=blast_arns)}
+
+    # 3c) true reachability (DESIGN §12.12) — deepens the 3b wildcard PROXY into a FACT when
+    # the deployer enabled Cartography's opt-in permission_relationships mapping. Those typed
+    # CAN_* edges say which concrete resources each principal can reach, and via which
+    # capability. Keyed on the same principal ARNs as 3b. Two cheap aggregations: per-capability
+    # distinct-target counts (`by_rel`) and a de-duplicated resource `total` (a bucket reachable
+    # by both CAN_READ and CAN_WRITE counts once). Attached onto the 3b rows so _blast_from_rows
+    # aggregates reachability alongside the proxy (incl. the EC2→role bridge inheritance). No
+    # edges (default sync) => nothing attached => the wildcard proxy stands alone, unchanged.
+    reach = {a: {"by_rel": {}, "total": 0} for a in blast_arns}
+    for r in q("UNWIND $arns AS a MATCH (pr)-[rel]->(t) "
+               "WHERE pr.arn=a AND (pr:AWSRole OR pr:AWSUser) AND type(rel) IN $rels "
+               "RETURN a AS key, type(rel) AS rel, count(DISTINCT t) AS n",
+               arns=blast_arns, rels=PERMISSION_RELS):
+        reach[r["key"]]["by_rel"][r["rel"]] = r["n"]
+    for r in q("UNWIND $arns AS a MATCH (pr)-[rel]->(t) "
+               "WHERE pr.arn=a AND (pr:AWSRole OR pr:AWSUser) AND type(rel) IN $rels "
+               "RETURN a AS key, count(DISTINCT t) AS total", arns=blast_arns, rels=PERMISSION_RELS):
+        reach[r["key"]]["total"] = r["total"]
+    for a, row in blast.items():
+        rr = reach.get(a)
+        if rr and rr["by_rel"]:
+            row["reach"] = rr
 
     out = {}
     for f in findings:
@@ -1481,7 +1530,7 @@ def cmd_graph_check(cfg, prowler_bin, aws_profile, prowler_output):
              "v1 keyword exposure flag (DESIGN §12.4)")
         return 1
 
-    joined = exposed = admin = 0
+    joined = exposed = admin = passrole = 0
     rows = []
     for f in findings:
         gf = facts.get(f["id"], _empty_facts())
@@ -1493,10 +1542,13 @@ def cmd_graph_check(cfg, prowler_bin, aws_profile, prowler_output):
         br = gf["blast_radius"]
         if br and br["admin_like"]:
             admin += 1
+        if br and (br.get("reachable") or {}).get("can_pass_role"):
+            passrole += 1
         rows.append((f, gf, exp, br))
 
     print(f"graph-check: {len(findings)} findings | joined to graph: {joined} "
-          f"| exposure_path=true: {exposed} | admin-like blast: {admin}")
+          f"| exposure_path=true: {exposed} | admin-like blast: {admin} "
+          f"| can-pass-role (reachability): {passrole}")
     print("-" * 100)
     for f, gf, exp, br in rows:
         jb = gf["join_by"] or "-"
@@ -1507,6 +1559,11 @@ def cmd_graph_check(cfg, prowler_bin, aws_profile, prowler_output):
         if br:
             blast_s = (f"admin={br['admin_like']} star={br['star_action_stmts']} "
                        f"wild={br['wildcard_service_stmts']} allow={br['allow_stmt_count']}")
+            reach = br.get("reachable")
+            if reach:
+                blast_s += (f" reach={reach['total']}"
+                            f"{' PASS_ROLE' if reach['can_pass_role'] else ''}"
+                            f"{' SECRET' if reach['can_read_secret'] else ''}")
         print(f"[{f['resource_type']:22s}] join={jb:3s} {label:20s} "
               f"exposure={exp_s:7s} ({reasons}) blast[{blast_s}]")
         print(f"    {f['resource'][:96]}")

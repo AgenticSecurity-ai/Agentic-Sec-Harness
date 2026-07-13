@@ -160,13 +160,19 @@ def finding_epss(item):
 def graph_over_privileged(item):
     """Graph-derived over-privilege for the finding's IAM principal (collector fact),
     or None when the graph has no blast-radius opinion (the resource is not a joined IAM
-    principal, or [graph] is off / unavailable). A wildcard action (`*`) or a `service:*`
-    statement on the principal is the honest v1 proxy for over-privilege — NOT true
-    reachability, which needs the opt-in permission-relationship edges (DESIGN §12.9)."""
+    principal, or [graph] is off / unavailable). Two collector signals, either sufficient:
+    (1) the wildcard proxy — a `*` or `service:*` Allow statement (the honest v1 signal,
+    always available); and (2) TRUE reachability — when the deployer enabled the opt-in
+    permission_relationships mapping, an `iam:PassRole` reachability edge is a
+    privilege-escalation path even with NO wildcard statement (DESIGN §12.12). Reachability
+    only strengthens the signal; its absence degrades to the proxy alone."""
     br = (item.get("graph") or {}).get("blast_radius")
     if not br:
         return None
-    return bool(br.get("admin_like") or (br.get("wildcard_service_stmts") or 0) > 0)
+    if br.get("admin_like") or (br.get("wildcard_service_stmts") or 0) > 0:
+        return True
+    reach = br.get("reachable")
+    return bool(reach and reach.get("can_pass_role"))
 
 
 def floor_priority(priority, item, triage_cfg):
@@ -319,8 +325,10 @@ def build_rationale(item, verdict, priority):
     if crit not in ASSET_CRITICALITY:
         crit = "unknown"
     # excess_privilege: the graph blast-radius is a collector FACT that can force it True
-    # (DESIGN §12.1 — it grounds excess_privilege), but never forces it False: the wildcard
-    # proxy is incomplete (§12.9), so the LLM may still see over-privilege the graph misses.
+    # (DESIGN §12.1 — it grounds excess_privilege), but never forces it False: even with the
+    # opt-in reachability edges (§12.12) the graph is incomplete (§12.9), so the LLM may still
+    # see over-privilege the graph misses. The blast_radius (incl. any `reachable` block) is
+    # recorded verbatim in the signed evidence via rationale["graph"]["blast_radius"] below.
     excess = bool(verdict.get("excess_privilege", False)) or bool(graph_over_privileged(item))
     rationale = {
         "kev_listed": finding_kev(item),
