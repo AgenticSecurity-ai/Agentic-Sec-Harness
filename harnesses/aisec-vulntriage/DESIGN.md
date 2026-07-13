@@ -167,8 +167,11 @@ it is **where the private key lives**.
   transparency log** (short-lived OIDC-bound cert + public append-only log, so even the
   operator cannot silently rewrite history). Both add dependencies (AWS reach / network
   + Sigstore) that a walking skeleton should not require. v1 ships the simple local-PEM
-  path; **Sigstore keyless + Rekor is the roadmap stage-3 target** (§8), with KMS as an
-  alternative if staying inside AWS is preferred.
+  path; **off-host signing is the roadmap stage-3 target** (§8, annex §15). Decision (§15.2):
+  **KMS-delegated signing ships first** for this deployment class (unattended host, already in
+  AWS, and — crucially — verification stays offline/AWS-independent via the exported public key,
+  §15.3); **Sigstore keyless + Rekor** is the higher-assurance, cloud-neutral option deferred to
+  S3.5b behind its OIDC-identity prerequisite.
 
 ### 3.6 License hygiene
 
@@ -385,8 +388,14 @@ the cross-harness session log; this checklist is the vulntriage-specific roadmap
      degrade all live-exercised; live ledger/evidence byte-identical sha256 — §14.8). The
      *write-back* direction §8.3 first named ("push signed verdicts") is split off as a deferred
      opt-in (S3.4b, §14.2) — it would be the first write outside Discord/ledger and is Stage-4-adjacent.
-   - ⏳ **S3.5 Off-host signing** — Sigstore keyless + Rekor / KMS-delegated signing;
-     delivers the non-repudiation the v1 local-PEM path does not (separate PR).
+   - 🟡 **S3.5 Off-host signing** — moves evidence signing off the host to deliver the
+     non-repudiation the v1 local-PEM path does not (§3.5, §15). **S3.5.0 design annex ✅**
+     (§15 — analyzes KMS-delegated vs Sigstore keyless+Rekor; **decision: KMS-delegated
+     ships first** for this deployment class — unattended cron, already in AWS, verification
+     stays offline/AWS-independent, stdlib-only via the `aws kms sign` CLI; a fourth
+     `_load_signer()` tier, default off, chain unchanged). **S3.5.1 KMS signer / S3.5.2 live
+     / S3.5.3 docs ⏳.** **Sigstore keyless + Rekor** = deferred higher-assurance, cloud-neutral
+     option (S3.5b) behind its OIDC-identity prerequisite.
 4. ⏳ **Phase 4–6 (execution)** — *this* is where the architecture escalates beyond B2:
    the tool-less orchestrator model gives way to **agentic tool_call** with tier-2
    mutating tools, and the governance the report specifies becomes load-bearing —
@@ -419,9 +428,10 @@ the cross-harness session log; this checklist is the vulntriage-specific roadmap
   SHA256 (stdlib fallback, integrity-only) / none (default, chain-only + warn), with an
   honest `sig_alg` label. Key management for v1 = **local PEM** on the host
   (`VULNTRIAGE_EVIDENCE_EC_KEY`), with the host-compromise-⇒-forgery limit documented,
-  not hidden. True non-repudiation (off-host signing authority) is deferred: **Sigstore
-  keyless + Rekor is the roadmap stage-3 target** (§8), KMS-delegated signing an
-  in-AWS alternative.
+  not hidden. True non-repudiation (off-host signing authority) is the roadmap stage-3 target
+  (§8, annex §15): **KMS-delegated signing ships first** (§15.2 — best fit for this deployment
+  class; verification stays offline/AWS-independent, §15.3), with **Sigstore keyless + Rekor**
+  the higher-assurance, cloud-neutral option deferred to S3.5b behind its OIDC-identity prerequisite.
 - **Prowler invocation.** Pinned CLI subprocess vs library; which check packs
   (CIS / exposure) are on by default in `config.toml`.
 - **Reviewer surface.** v1 posts to Discord (post-hoc review, like the monitors). If
@@ -1332,3 +1342,202 @@ state blocks it:
   machine-triage to a finding's notes/tags via a *separate write-scoped* token, default off,
   never overwriting human triage. Documented as the point where the read-only surface would widen;
   its governance is Stage-4-adjacent.
+
+## 15. Stage 3 design annex — off-host evidence signing (KMS-delegated)
+
+> **Status: design draft for stage 3 — sub-milestone S3.5.** This annex is the detailed
+> expansion of the **third and last** of roadmap item **§8.3**'s three tracks (Trivy → DefectDojo →
+> off-host signing), the twin of §13/§14. It is scoped to **off-host signing only**. Like those
+> annexes, this is the *design judgement* written down first; the implementation (S3.5.1) is a
+> later step. The headline is that this track is **not a collector** — it adds no input source and
+> touches no triage logic. It changes **how the evidence log is signed**, closing the one gap §3.5
+> documents but deliberately does not fix in v1: a **local PEM ⇒ host compromise ⇒ signature
+> forgery**. It adds a **fourth signer tier** behind the *already-pluggable* `_load_signer()`
+> (§3.5), ships **default-off**, and makes one genuine decision (§15.2): **ship KMS-delegated
+> signing first**, with **Sigstore keyless + Rekor** analyzed as the higher-assurance, cloud-neutral
+> alternative deferred for OIDC-bearing environments.
+
+### 15.1 What off-host signing buys — closing the documented non-repudiation gap
+
+§3.5 ships a decided three-tier scheme: **ECDSA local PEM** / **HMAC-SHA256** / **none** (default).
+The *best* of these today — ECDSA over a local PEM — is still a **local key**: an attacker who
+compromises the host holds the private key *and* the append-only log, so they can rewrite history
+and re-sign it **offline, with zero trace**. §3.5 states this limit honestly rather than hiding it;
+this annex is where it gets closed. Off-host signing moves the signing **authority** off the host so
+the private key is either **unstealable** (AWS KMS — the key never leaves the HSM) or **nonexistent
+and publicly logged** (Sigstore — ephemeral key + a public transparency log). That is the audit-grade
+non-repudiation §3.5 targets.
+
+Unlike Trivy (§13) and DefectDojo (§14), off-host signing **adds no untrusted input source** — it
+swaps the *output* backend that produces the `sig` bytes. The hash chain, the `entry_hash`, the
+record schema (§5), and `verify()`'s chain walk are all **unchanged**; only the origin of the
+signature changes. So — as with the other Stage-3 tracks — the value is mostly *reuse*: the whole
+evidence machinery (§3.5) stays, one signer tier is added in front of it.
+
+### 15.2 The two off-host paths, and why KMS ships first (this is the fork)
+
+Parallel to §14.2, there are two genuine off-host options, and they differ on a property axis and an
+operational axis:
+
+- **(A) KMS-delegated signing.** An AWS KMS **asymmetric** key (`KeyUsage=SIGN_VERIFY`,
+  `KeySpec=ECC_NIST_P256`) signs each entry via `aws kms sign`; the private key **never leaves the
+  HSM**, and **every `Sign` call is logged off-host in CloudTrail**. Residual limit, stated honestly:
+  a host attacker holding the *signing credential* can still request signatures over forged **new**
+  entries **while they hold it** — but (a) they cannot rewrite history *offline* (no private key to
+  steal), (b) every signature is an off-host-logged API call, and (c) with a separate least-privilege
+  credential (§15.4) the blast radius is one key's Sign capability, not the key itself.
+- **(B) Sigstore keyless + Rekor.** A short-lived OIDC-bound Fulcio certificate signs, and the
+  signature (or its hash) is published to the **public, append-only Rekor transparency log** — so
+  even the **operator cannot silently rewrite their own history**. This is the strongest property and
+  it is **cloud-neutral**. Its cost: keyless signing needs an **ambient OIDC identity**. CI (GitHub
+  Actions) and workload platforms (EKS/GKE) have one; an **unattended WSL cron host does not** — a
+  browser flow is impossible in cron, so a machine-identity / workload-token setup must be solved
+  *first*.
+
+**Recommendation (for S3.5): ship (A) KMS-delegated signing first.** For this deployment class —
+unattended cron, stdlib-only Python, **already using AWS** for the read-only Prowler scan — KMS fits
+with zero operational friction: it reuses the existing `~/.aws` reach, the `aws kms sign` **external
+CLI** keeps the harness stdlib-only (the Prowler/Trivy "external tool does the heavy lifting" pattern,
+no boto3), and it works unattended. It closes the *key-theft* leg of the local-PEM gap and adds an
+*off-host audit trail* (CloudTrail) — the concrete new property. **Sigstore (B)** is documented as the
+**higher-assurance, cloud-neutral** path, deferred to **S3.5b** behind its OIDC-identity prerequisite
+— the signing analogue of §14.2's write-back fork and §13.3's ECR fork ("the stronger option, gated
+on a conscious prerequisite"). This **refines §8.3**: *S3.5 = KMS-delegated off-host signing;
+Sigstore keyless + Rekor = deferred higher-assurance option (S3.5b).* It also **inverts** §3.5's
+earlier "Sigstore is the target, KMS an alternative" phrasing on the basis of the deployment reality
+above — with §15.3 showing KMS does not actually couple the harness to AWS.
+
+### 15.3 The coupling question — KMS does *not* couple the harness to AWS (verify stays offline)
+
+The obvious objection to KMS-first is vendor coupling. The precise answer distinguishes three layers,
+and only the third has any AWS dependency at all:
+
+1. **Harness architecture — not coupled.** `_load_signer()` already resolves a
+   `(sign_fn, alg_label)` tuple by trying tiers in order and returns a backend-agnostic signer; the
+   chain / append / `verify` structure never knows which backend produced the bytes. KMS is **one more
+   tier**, exactly as ECDSA-local-PEM is one optional tier today. The architecture stays backend-neutral.
+2. **Distribution default — not coupled.** The shipped default stays **`none`** (chain-only + warn).
+   KMS is **strictly opt-in** via a non-secret env key (`VULNTRIAGE_EVIDENCE_KMS_KEY_ID`). A
+   self-hoster who does not use AWS is **entirely unaffected** — no import, no call, no dependency —
+   and stdlib-only is preserved because signing shells out to the **`aws kms sign` external CLI**, so
+   no boto3 ever enters the harness.
+3. **★ Verification — AWS-independent and offline.** Export the public key **once**
+   (`aws kms get-public-key` → cache a PEM in `VULNTRIAGE_EVIDENCE_EC_PUBKEY`), and thereafter
+   `verify()` checks every ECDSA signature with the **public key + stdlib/`cryptography`** — **no AWS
+   access is ever needed to audit the log.** *Signing* needs AWS reach; *verification does not.* This
+   is what keeps the audit trail independently verifiable **forever**, including after a cloud
+   migration: past KMS-signed entries still verify against the exported public key.
+
+The coupling that genuinely exists is **operational and scoped to deployments that choose KMS**: their
+*ongoing signing* depends on a KMS key + AWS reach + a `kms:Sign`-scoped credential — **the same
+dependency class Prowler already imposes** for the read-only scan. The one axis where (B) Sigstore is
+strictly better is that KMS ties the signing *authority* to AWS, whereas Sigstore's authority is
+cloud-neutral public infrastructure — recorded here so S3.5b's rationale is explicit, not rediscovered.
+
+### 15.4 IAM & credential separation — keep the scan role pure read-only
+
+`kms:Sign` and `kms:GetPublicKey` are **not** in `SecurityAudit` / `ViewOnlyAccess`, so signing needs
+its own permission — and that permission must **not** be added to the read-only scanning role
+(`vulntriage-readonly`, S1.8②). **Hard rule: signing uses a separate credential from scanning.** A
+distinct `VULNTRIAGE_EVIDENCE_KMS_PROFILE` (or a dedicated role) is scoped to **exactly**
+`kms:Sign` + `kms:GetPublicKey` on the **single key ARN**, and the KMS **key policy** permits `Sign`
+only from that principal. The scan role stays pure read-only; the two credentials are never the same.
+
+Note on the read-only-account invariant (§3.1): `kms:Sign` **mutates no account infrastructure** — it
+produces a signature and changes no resource — so it does not break the CSPM-sense "read-only account"
+ethos. But it *is* a privileged capability, so it is isolated, least-privilege, single-key-ARN, and
+CloudTrail-logged rather than folded into the scan role. The key itself is created **out-of-band** by
+the operator (like Neo4j in §12 or a DefectDojo instance in §14); the **key ARN is non-secret** →
+`config.toml`/env, and — per convention #3 — **no secret material ever enters the repo** (there is no
+private key *to* place, which is the whole point).
+
+### 15.5 Implementation shape — a fourth signer tier, chain unchanged
+
+Parallel to §14.4, the mechanics — all inside `evidence.py`, none touching triage:
+
+- **Resolution order becomes `ECDSA-KMS → ECDSA-local-PEM → HMAC → none`.** A `_load_kms_signer()`
+  (twin of `_load_ec_signer()`) is tried first when `VULNTRIAGE_EVIDENCE_KMS_KEY_ID` is set; otherwise
+  control falls through to the **existing tiers, unchanged** (regression-safe — a deployment with no
+  KMS env behaves exactly as today).
+- **`sign_fn(entry_hash_hex)` shells out** to
+  `aws kms sign --key-id <arn> --message <entry_hash_hex> --message-type RAW --signing-algorithm
+  ECDSA_SHA_256 --output text --query Signature`, base64-decodes → hex, honouring the **same return
+  contract** as the local-PEM signer. `message-type RAW` signs the **hex `entry_hash` string** — byte-
+  for-byte the same input the local signer feeds `key.sign(entry_hash_hex.encode("ascii"), …)` — so a
+  KMS-signed and a PEM-signed entry are verifiable by **one code path per curve**, regardless of who
+  signed. `sig_alg` label = **`"ECDSA-P256-SHA256-KMS"`** — the honest-label discipline of §3.5: KMS is
+  never dressed up as local, and a downgrade is never dressed up as KMS.
+- **The chain is unchanged.** `entry_hash = SHA-256(seq\n ts\n prev_hash\n canonical(record))` is
+  identical; only the signature bytes' origin differs. A **mixed log** (some entries PEM-signed before
+  a cutover, some KMS after) still chain-verifies end-to-end, each entry self-describing its `sig_alg`.
+- **`verify()` gains real ECDSA verification.** When a public-key PEM is available
+  (`VULNTRIAGE_EVIDENCE_EC_PUBKEY`, exported once from KMS *or* the local key) and `cryptography` is
+  importable, each `ECDSA-P256-SHA256*` entry's `sig` is verified against its `entry_hash` with the
+  public key — making third-party verification **real** (the point of asymmetric signing). Absent the
+  pubkey/lib, ECDSA sigs stay structurally-present-only and the **chain remains authoritative for
+  tamper-evidence** (unchanged from today's `verify` docstring).
+- **Fail-closed on signing failure — never a silent downgrade.** If KMS is *configured* and `Sign`
+  fails (no AWS reach, throttle, `AccessDenied`), the signer does **bounded retry then raise** —
+  it must **not** silently write `sig_alg=none`, which would be a false audit downgrade. This is the
+  opposite posture from a *collector* failure (§14.3's loud degrade-to-other-sources): a collector is
+  an optional add-on, but **evidence integrity is the core product**, so it **fails closed**. This
+  composes cleanly with `run.py`'s ordering — verdicts are **signed into the evidence log FIRST, then
+  the digest posts, then the ledger marks** (run.py "sign FIRST"). So a KMS failure aborts **before any
+  Discord post and before any `mark`**: nothing is posted, nothing is marked, the findings stay
+  unmarked and **retry next run** — no double-post, consistent with the per-chunk recovery model.
+
+### 15.6 B2 preservation & threat model — signing is orchestrator-only
+
+Off-host signing lives **entirely** in the deterministic orchestrator (`evidence.py`); the **tool-less
+LLM never sees** the key, the KMS credential, or the signing call, and off-host signing introduces **no
+new untrusted input** (it is an output backend, not an input source). The B2 boundary (§3.1–§3.2) does
+**not** move. The read-only-account invariant is intact — `kms:Sign` mutates no infrastructure and is
+isolated to a separate least-privilege credential (§15.4).
+
+**Threat closed, stated honestly (the §3.5 discipline of never overstating the guarantee):** local PEM
+⇒ host compromise ⇒ *silent, offline, traceless* rewrite-and-re-sign. KMS closes the **key-theft** leg
+(the key is unstealable) and adds **off-host logging** (every `Sign` in CloudTrail). A host attacker
+holding the scoped credential can still sign forged **new** entries *while they hold it* — but each is
+an off-host-logged call and they cannot rewrite history offline. The **residual gap versus (B)
+Sigstore** — an operator (or a sufficiently privileged attacker) can still sign *some* forgery, whereas
+Rekor's public log defeats even the operator's own silent rewrite — is named here rather than papered
+over, and is exactly what S3.5b would close for deployments that can carry an OIDC identity.
+
+### 15.7 Verification strategy (account-state-independent)
+
+Mirrors §13.7 / §14.7 — prove the wiring offline, then first-light on real KMS without dirtying the
+live log:
+
+1. **Offline (the wiring), no AWS:** with `cryptography` available, generate a local EC P-256 keypair
+   and **stub the `aws kms sign` shell-out** to sign with it (a local stand-in for the HSM). Prove:
+   (a) `_load_signer()` resolves the **KMS tier first** when `VULNTRIAGE_EVIDENCE_KMS_KEY_ID` is set;
+   (b) entries carry `sig_alg="ECDSA-P256-SHA256-KMS"`; (c) `verify()` **validates** each sig against
+   the exported public key; (d) a **mixed PEM+KMS** log still chain-verifies; (e) a simulated `Sign`
+   failure **fails loud** (aborts, no silent `none` downgrade, nothing posted/marked); (f) with **no
+   KMS env**, resolution falls through to the existing tiers **unchanged** (regression). This is the
+   primary correctness gate — instance-state-independent, like Trivy's ECR-offline proof (§13.7-2).
+2. **Live (first-light, temp evidence log):** create a **throwaway** KMS asymmetric key
+   (`ECC_NIST_P256`, `SIGN_VERIFY`) + a scoped signing profile, point `VULNTRIAGE_EVIDENCE_KMS_KEY_ID`
+   at it, and run the harness against a **temporary evidence log** (never the live one — the
+   S1.8/S2.5/S3.2/S3.4.2 copy method). Confirm: real `aws kms sign` produces signatures,
+   `aws kms get-public-key` → PEM **verifies them offline** (`evidence.py verify ok`), and **CloudTrail
+   shows the `Sign` events** (the off-host audit trail — the actual new property). Confirm the **live**
+   evidence log is **byte-identical sha256** before/after. Tear down the throwaway key.
+
+### 15.8 Sub-milestones
+
+- **S3.5.0 Design annex** — this §15.
+- **S3.5.1 KMS signer** — ⏳ the fourth `_load_signer()` tier (`_load_kms_signer()` via `aws kms sign`),
+  `verify()` ECDSA-public-key support, fail-closed-on-Sign-failure, `VULNTRIAGE_EVIDENCE_KMS_KEY_ID` /
+  `_KMS_PROFILE` / `_EC_PUBKEY` env, and the offline gate (§15.7-1). Default off; chain/schema unchanged.
+- **S3.5.2 Live verification** — ⏳ real throwaway KMS key, temp evidence log, offline pubkey verify,
+  CloudTrail off-host trail, byte-identical live-log restore (§15.7-2).
+- **S3.5.3 Config/docs distribution** — ⏳ README "Appendix — enabling Stage 3 off-host signing" (KMS
+  key + scoped signing role provisioning, env/cron `--command-env` injection, public-key export for
+  offline verify), SKILL "Stage 3 — off-host signing" section, `.env.example`, and §8/§15.8 sync.
+  Mirrors Trivy's S3.3 / DefectDojo's S3.4.3.
+- **S3.5b Sigstore keyless + Rekor (deferred, higher-assurance)** — the **(B)** direction of §15.2: the
+  cloud-neutral, operator-can't-silently-rewrite path via Fulcio + the public Rekor transparency log.
+  Needs a machine-identity / workload-token setup an unattended cron host lacks (its OIDC-identity
+  prerequisite). Documented as the stronger option gated on that prerequisite — the signing analogue of
+  §14.2's write-back and §13.3's ECR fork.
