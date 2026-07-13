@@ -355,9 +355,9 @@ the cross-harness session log; this checklist is the vulntriage-specific roadmap
      mode on without a config-drift edit `git pull` would revert (PR #27); live cron
      `vulntriage-weekday` cut over to graph mode with the Neo4j password injected via
      `--command-env`, smoke-verified then enabled. **Graph mode is live.**
-3. 🟡 **+ More collectors & audit-grade evidence** — three independent tracks: **Trivy**
-   (image/package CVEs), **DefectDojo** (system of record), and **off-host signing**
-   (Sigstore keyless + Rekor / KMS) to move evidence signing off the host — the
+3. ✅ **+ More collectors & audit-grade evidence** — three independent tracks, all shipped:
+   **Trivy** (image/package CVEs), **DefectDojo** (system of record), and **off-host signing**
+   (KMS-delegated; Sigstore keyless + Rekor deferred to S3.5b) to move evidence signing off the host — the
    non-repudiation the v1 local-PEM path deliberately does not provide (§3.5). The Trivy
    track is detailed in **§13**. Sub-milestones (Trivy first, as its own PR):
    - ✅ **S3.0 Design annex** — §13: Trivy scope (image refs default / ECR opt-in),
@@ -388,7 +388,7 @@ the cross-harness session log; this checklist is the vulntriage-specific roadmap
      degrade all live-exercised; live ledger/evidence byte-identical sha256 — §14.8). The
      *write-back* direction §8.3 first named ("push signed verdicts") is split off as a deferred
      opt-in (S3.4b, §14.2) — it would be the first write outside Discord/ledger and is Stage-4-adjacent.
-   - 🟡 **S3.5 Off-host signing** — moves evidence signing off the host to deliver the
+   - ✅ **S3.5 Off-host signing** — moves evidence signing off the host to deliver the
      non-repudiation the v1 local-PEM path does not (§3.5, §15). **S3.5.0 design annex ✅**
      (§15 — analyzes KMS-delegated vs Sigstore keyless+Rekor; **decision: KMS-delegated
      ships first** for this deployment class — unattended cron, already in AWS, verification
@@ -398,8 +398,12 @@ the cross-harness session log; this checklist is the vulntriage-specific roadmap
      real throwaway KMS key + scoped signer role signed 3 entries; exported pubkey verified
      them offline AWS-independently, tamper flip → ECDSA mismatch, CloudTrail recorded 3
      `Sign` events under the *signer* role, live ledger byte-identical, key/role torn down).
-     **S3.5.3 docs ⏳.** **Sigstore keyless + Rekor** = deferred higher-assurance, cloud-neutral
-     option (S3.5b) behind its OIDC-identity prerequisite.
+     **S3.5.3 docs ✅** (README "Appendix — enabling Stage 3 off-host signing": KMS key +
+     scoped signer-role provisioning, non-secret key-id/profile env + cron `--command-env`
+     injection, public-key export for offline verify; SKILL "Stage 3 — off-host signing"
+     section; `.env.example` signing block — mirrors Trivy S3.3 / DefectDojo S3.4.3). **Stage 3
+     complete — all three tracks shipped.** **Sigstore keyless + Rekor** = deferred
+     higher-assurance, cloud-neutral option (S3.5b) behind its OIDC-identity prerequisite.
 4. ⏳ **Phase 4–6 (execution)** — *this* is where the architecture escalates beyond B2:
    the tool-less orchestrator model gives way to **agentic tool_call** with tier-2
    mutating tools, and the governance the report specifies becomes load-bearing —
@@ -1552,10 +1556,11 @@ AWS-min window), role + profile removed, scan role intact. AWS CLI v2 was instal
   11/11). Default off; chain/schema unchanged.
 - **S3.5.2 Live verification** — ✅ (§15.7-2 above) real throwaway KMS key, temp evidence log, offline pubkey verify,
   CloudTrail off-host trail, byte-identical live-log restore (§15.7-2).
-- **S3.5.3 Config/docs distribution** — ⏳ README "Appendix — enabling Stage 3 off-host signing" (KMS
-  key + scoped signing role provisioning, env/cron `--command-env` injection, public-key export for
-  offline verify), SKILL "Stage 3 — off-host signing" section, `.env.example`, and §8/§15.8 sync.
-  Mirrors Trivy's S3.3 / DefectDojo's S3.4.3.
+- **S3.5.3 Config/docs distribution** — ✅ README "Appendix — enabling Stage 3 off-host signing" (KMS
+  key + scoped signing role provisioning, non-secret key-id/profile env + cron `--command-env`
+  injection, public-key export for offline verify), SKILL "Stage 3 — off-host signing" section,
+  `.env.example` signing block, and §8/§15.8 sync. Mirrors Trivy's S3.3 / DefectDojo's S3.4.3.
+  **This closes all three Stage 3 tracks.**
 - **S3.5b Sigstore keyless + Rekor (deferred, higher-assurance)** — the **(B)** direction of §15.2: the
   cloud-neutral, operator-can't-silently-rewrite path via Fulcio + the public Rekor transparency log.
   Needs a machine-identity / workload-token setup an unattended cron host lacks (its OIDC-identity
