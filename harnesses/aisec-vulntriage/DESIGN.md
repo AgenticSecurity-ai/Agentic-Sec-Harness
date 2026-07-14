@@ -298,8 +298,17 @@ mutation forces agentic tools and load-bearing governance. The stage-level plan 
 stable; the sub-milestone checklist under stage 1 is the live progress view.
 
 Status legend: ✅ done · 🟡 in progress / unmerged · ⏳ planned, not started.
-Sub-milestone status is current as of 2026-07-10 (see the repo-root `STATUS.md` for
+Sub-milestone status is current as of 2026-07-14 (see the repo-root `STATUS.md` for
 the cross-harness session log; this checklist is the vulntriage-specific roadmap view).
+
+**Status: feature-complete for the read-only monitoring mission.** Stages 1–3 are all
+shipped and live (Prowler + graph context running under cron; Trivy / DefectDojo /
+off-host KMS signing shipped as default-off opt-ins). Stage 4 (execution) is a
+**permanent non-goal by principle** (§8.4 below). Remaining work is stabilization and
+operation, not new capability; the only deferred-optional items are the evidence
+signing key (S1.8), deployer tuning of the S2.7 over-privilege knobs, and the two
+higher-assurance / write-back options explicitly held behind their prerequisites
+(S3.5b Sigstore, S3.4b DefectDojo write-back).
 
 1. **v1 — walking skeleton** (this doc) — Prowler + feeds + AI triage + Discord +
    signed evidence log. Read-only, B2-preserving, tier-1 tools only. Sub-milestones:
@@ -336,7 +345,7 @@ the cross-harness session log; this checklist is the vulntriage-specific roadmap
    - ✅ **S1.9 v0.1 OSS release** — read-only, B2-preserving walking skeleton declared
      v0.1; release-prep docs finalized (`.env.example` documents the recommended
      read-only named profile + stable-path Prowler venv; README/DESIGN progress synced).
-2. 🟡 **+ Graph context** — add Cartography(+Neo4j); triage rationale gains exposure
+2. ✅ **+ Graph context** — add Cartography(+Neo4j); triage rationale gains exposure
    paths / blast radius (the toxic-combination value). Still read-only, still B2.
    Detailed design in **§12**. Sub-milestones:
    - ✅ **S2.0 Design annex** — §12: IAM diff (existing read-only role suffices),
@@ -389,7 +398,7 @@ the cross-harness session log; this checklist is the vulntriage-specific roadmap
    - ✅ **S3.2 Live verification** — real Trivy scan of a Log4Shell image → first non-empty
      KEV/EPSS enrichment on real data, floor → Critical on 5 KEV findings, digest posted
      intact; live ledger/evidence untouched (§13.7).
-   - 🟡 **S3.3 Config/docs** — README "Appendix — enabling Stage 3 Trivy" (incl. the
+   - ✅ **S3.3 Config/docs** — README "Appendix — enabling Stage 3 Trivy" (incl. the
      ECR-discovery IAM note), SKILL "Stage 3" section, `.env.example`, this §8 sync.
    - ✅ **S3.4 DefectDojo** — import findings from DefectDojo (system of record) as a
      **read-only** collector — one integration, N scanners. Design annex **§14** done
@@ -464,9 +473,12 @@ the cross-harness session log; this checklist is the vulntriage-specific roadmap
   wanted, execution belongs in a separate, governance-carrying harness. **Phase 4
   non-destructive writes** (recommendation text — already emitted; ticket creation / DefectDojo
   verdict write-back S3.4b, §14.2) remain the one adjacent seam open as a future opt-in.
-- **Name.** `aisec-vulntriage` is provisional. The `aisec-` prefix here means "an AI
-  agent doing security work," vs the monitors' "monitoring AI-security topics" — same
-  prefix, different sense. Confirm keep vs rename (e.g. `aisec-cloud-triage`).
+- ~~**Name.**~~ **Resolved: keep `aisec-vulntriage`.** The `aisec-` prefix here means
+  "an AI agent doing security work," vs the monitors' "monitoring AI-security topics" —
+  same prefix, different sense. Confirmed at the ops-landing (feature-complete) point:
+  the live cron / agent / workspace and all docs already reference this name, so a
+  rename would cost more than it clarifies. `aisec-cloud-triage` was the considered
+  alternative; declined.
 - ~~**Graph context timing.**~~ **Resolved: stage 2, not v1.** Cartography(+Neo4j)
   is deferred to roadmap stage 2 (Neo4j is the heaviest single dependency). v1 ships
   without it; exposure context is approximated by the `internet_exposed` /
@@ -481,10 +493,17 @@ the cross-harness session log; this checklist is the vulntriage-specific roadmap
   (§8, annex §15): **KMS-delegated signing ships first** (§15.2 — best fit for this deployment
   class; verification stays offline/AWS-independent, §15.3), with **Sigstore keyless + Rekor**
   the higher-assurance, cloud-neutral option deferred to S3.5b behind its OIDC-identity prerequisite.
-- **Prowler invocation.** Pinned CLI subprocess vs library; which check packs
-  (CIS / exposure) are on by default in `config.toml`.
-- **Reviewer surface.** v1 posts to Discord (post-hoc review, like the monitors). If
-  a pre-report human gate is wanted even for a read-only report, add a staging step.
+- ~~**Prowler invocation.**~~ **Resolved: pinned CLI subprocess; default services
+  `ec2/s3/iam/rds/awslambda`.** The CLI-subprocess-with-version-pin form is what
+  shipped and was live-verified (§4, S1.5); the default `services` set is confirmed at
+  ops-landing — it is live-e2e-verified and its posting volume is already bounded by
+  digest mode (S1.6). Deployers can widen `[prowler].services` in their own
+  `config.toml` (adding services raises finding count, so re-tune `detail_top_n`).
+- ~~**Reviewer surface.**~~ **Resolved: Discord post-hoc review** (same as the
+  monitors). The output is a read-only report, so a pre-post human gate is over-heavy
+  and would add friction to unattended cron operation; humans review after the fact in
+  Discord and dig deeper as needed. A pre-report staging gate remains available to a
+  deployer who wants it, but is not the shipped default.
 
 ## 11. Design lineage
 
