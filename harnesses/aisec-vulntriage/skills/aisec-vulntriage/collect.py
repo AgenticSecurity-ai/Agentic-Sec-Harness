@@ -1530,7 +1530,16 @@ def cmd_graph_check(cfg, prowler_bin, aws_profile, prowler_output):
              "v1 keyword exposure flag (DESIGN §12.4)")
         return 1
 
-    joined = exposed = admin = passrole = 0
+    # S2.7 (DESIGN §12.12.1): the breadth / secret-read over-privilege knobs are opt-in and
+    # off by default because a blanket version over-fires — so the operator must MEASURE
+    # before enabling. Read the configured breadth threshold the same STRICT way run.py does
+    # (a bool or string is a config type error → treated as unset) and report, alongside the
+    # always-on signals, how many principals each knob WOULD flag.
+    bthr = cfg.get("triage", {}).get("blast_breadth_over_priv", 0)
+    bthr = bthr if isinstance(bthr, int) and not isinstance(bthr, bool) and bthr > 0 else 0
+
+    joined = exposed = admin = passrole = secret = breadth = 0
+    max_reach = 0
     rows = []
     for f in findings:
         gf = facts.get(f["id"], _empty_facts())
@@ -1542,13 +1551,23 @@ def cmd_graph_check(cfg, prowler_bin, aws_profile, prowler_output):
         br = gf["blast_radius"]
         if br and br["admin_like"]:
             admin += 1
-        if br and (br.get("reachable") or {}).get("can_pass_role"):
+        reach = (br or {}).get("reachable") or {}
+        if reach.get("can_pass_role"):
             passrole += 1
+        if reach.get("can_read_secret"):
+            secret += 1
+        tot = reach.get("total") or 0
+        max_reach = max(max_reach, tot)
+        if bthr and tot >= bthr:
+            breadth += 1
         rows.append((f, gf, exp, br))
 
+    breadth_s = (f"breadth>={bthr}: {breadth}" if bthr
+                 else f"breadth: off (max reach={max_reach})")
     print(f"graph-check: {len(findings)} findings | joined to graph: {joined} "
           f"| exposure_path=true: {exposed} | admin-like blast: {admin} "
-          f"| can-pass-role (reachability): {passrole}")
+          f"| can-pass-role (reachability): {passrole} "
+          f"| secret-read (reachability): {secret} | {breadth_s}")
     print("-" * 100)
     for f, gf, exp, br in rows:
         jb = gf["join_by"] or "-"
