@@ -889,7 +889,10 @@ already-synced policy data (validating the §12.9 note).
 proxy stands exactly as before. There is deliberately **no** `[graph]` flag for it — like the EC2 bridge,
 it lights up when the data supports it and degrades silently when it doesn't. (Consequence: an operator
 who wants reachability must add the mapping flag to their **recurring** Cartography sync; a plain re-sync
-removes the edges and the harness reverts to the proxy — graceful, never wrong.) `can_read_secret` and the
+removes the edges and the harness reverts to the proxy — graceful, never wrong. This operational
+requirement is now packaged as [`ops/sync-cartography.sh`](../../ops/sync-cartography.sh), which bakes
+`--permission-relationships-file` into the sync and verifies the typed edges are present afterward, so an
+operator scheduling *that* as the recurring sync keeps reachability lit by construction.) `can_read_secret` and the
 `total`/`by_rel` breadth are recorded in the signed evidence and shown to the LLM, but did **not** by
 themselves raise the floor at S2.6 — only the crisp `can_pass_role` escalation path did. The breadth
 threshold and secret-read signals were the "future tuning knob" flagged here; **S2.7 (§12.12.1) adds them
