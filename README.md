@@ -13,6 +13,7 @@ harness into your own OpenClaw, supply your own credentials, and run it.
 | ------- | ------ | ------------ |
 | [`aisec-arxiv-monitor`](harnesses/aisec-arxiv-monitor/) | arXiv (AI-security) | Posts new AI-security papers, classified and summarized, to Discord |
 | [`aisec-news-monitor`](harnesses/aisec-news-monitor/) | The Hacker News (RSS) | Filters a general security-news feed to AI-security stories, summarized, to Discord |
+| [`aisec-vulntriage`](harnesses/aisec-vulntriage/) | AWS (Prowler + optional graph / Trivy / DefectDojo) | Collects cloud vulnerability findings, AI-triages them under a deterministic priority floor (KEV / EPSS / exposure / over-privilege), and posts a prioritized, signed-evidence-backed digest to Discord |
 
 See each harness's own `README.md` for what it watches and how to deploy it.
 _(More harnesses will be added under `harnesses/`.)_
@@ -43,6 +44,7 @@ Every harness in this repo follows the same shape:
    notes for running it in your own OpenClaw:
    - [aisec-arxiv-monitor/README.md](harnesses/aisec-arxiv-monitor/README.md)
    - [aisec-news-monitor/README.md](harnesses/aisec-news-monitor/README.md)
+   - [aisec-vulntriage/README.md](harnesses/aisec-vulntriage/README.md)
 
 General prerequisites: an OpenClaw install with a running gateway, a configured text
 model (Bedrock/Claude-class or any OpenClaw text model), a Discord bot, and Python
