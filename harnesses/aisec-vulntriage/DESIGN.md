@@ -37,8 +37,13 @@ That structured rationale is what a human reviews and what the evidence log sign
 ## 2. Scope — v1 = Phase 1–3 + 7 (read-only)
 
 The full vulnerability/patch lifecycle is Phase 0–7. **v1 covers collection through
-reporting, and stops before any change.** Execution (Phase 4–6) ships later, gated,
-as an explicit evolution (see Roadmap).
+reporting, and stops before any change.** Execution — **applying a fix (Phase 5) and
+verifying it (Phase 6)** — is **out of scope by principle, not just "later"**: it is a
+hard-to-undo, destructive change requiring human evaluation and mutate permissions, and it
+would dissolve both the read-only-IAM outer guarantee (§3.1) and the tool-less B2 invariant
+(§3.2) this harness is built on. If ever wanted, it belongs in a separate governance-carrying
+harness (see Roadmap §8). The one adjacent seam left open is **Phase 4 non-destructive writes**
+(recommendation text — already emitted; ticket creation / verdict write-back) as a future opt-in.
 
 | Phase | In v1? | What it does | Who acts |
 |---|:--:|---|---|
@@ -46,9 +51,9 @@ as an explicit evolution (see Roadmap).
 | 1. Vulnerability collection | ✅ | Prowler (CSPM: config + exposure) + free intel feeds (NVD / CISA KEV / EPSS) | Tool (read-only) |
 | 2. Enrich / de-dup | ✅ | Normalize, de-duplicate, correlate findings ↔ assets, attach KEV/EPSS | Tool (deterministic) |
 | 3. Triage / prioritize | ✅ | **The core.** LLM assigns priority + emits structured rationale | **AI (tool-less)** |
-| 4. Decide remediation | ⛔ v1 | recommendation text only; no plan is enacted | (future) human-gated |
-| 5. Apply fix | ⛔ v1 | out of scope — no mutating tool exists in v1 | (future) human-gated |
-| 6. Verify | ⛔ v1 | out of scope | (future) |
+| 4. Decide remediation | ⛔ v1 | recommendation text only; no plan is enacted (non-destructive write = ticket/write-back is a future opt-in) | human, not this harness |
+| 5. Apply fix | ⛔ **non-goal** | destructive change — no mutating tool exists, and by principle never will here | separate governance-carrying harness |
+| 6. Verify | ⛔ **non-goal** | verifying an applied change; out of scope with Phase 5 | (separate harness) |
 | 7. Report + evidence | ✅ | Discord digest of prioritized findings + append-only **signed** evidence log | Tool (deterministic) |
 
 **v1 = walking skeleton.** Prowler + free feeds + AI triage + Discord + signed
@@ -102,14 +107,17 @@ priority label — it can never touch the host, the account, or the evidence log
 
 ### 3.4 Two-tier tool model (v1 has only tier 1)
 
-The design reserves a hard line for when execution is added:
+The design draws a hard line that this harness sits entirely on one side of:
 
 - **Tier 1 — collect/read (auto, allow):** Prowler, feed pulls, graph queries.
-  Read-only; run freely. **v1 is entirely tier 1.**
+  Read-only; run freely. **This harness is entirely tier 1** — permanently, not just in v1.
 - **Tier 2 — mutate/write (deny by default, human-gated):** ticket creation, patch
-  apply, config change. **Not present in v1.** When added, tier-2 calls are blocked
-  unless a human approval gate passes, enforced structurally in the harness layer
-  (and later an AI Gateway + ACS fail-closed policy), **never** by prompt.
+  apply, config change. **Not present, and a non-goal here (§8.4).** Destructive tier-2
+  (patch apply / config change) belongs in a separate governance-carrying harness, where
+  tier-2 calls would be blocked unless a human approval gate passes, enforced structurally
+  in the harness layer (and an AI Gateway + ACS fail-closed policy), **never** by prompt.
+  The only tier-2 seam this harness might ever grow is a **non-destructive write** (ticket
+  creation / verdict write-back) as a future opt-in — never a mutation to the account.
 
 ### 3.5 Evidence (VAT) — every verdict is signed
 
@@ -416,12 +424,24 @@ the cross-harness session log; this checklist is the vulntriage-specific roadmap
      section; `.env.example` signing block — mirrors Trivy S3.3 / DefectDojo S3.4.3). **Stage 3
      complete — all three tracks shipped.** **Sigstore keyless + Rekor** = deferred
      higher-assurance, cloud-neutral option (S3.5b) behind its OIDC-identity prerequisite.
-4. ⏳ **Phase 4–6 (execution)** — *this* is where the architecture escalates beyond B2:
-   the tool-less orchestrator model gives way to **agentic tool_call** with tier-2
-   mutating tools, and the governance the report specifies becomes load-bearing —
-   **human approval gate + AI Gateway (LiteLLM/Portkey) + ACS fail-closed policy at
-   the tool-execution checkpoint + full VAT**. Introduced exactly when mutation is on
-   the table, not before.
+4. ⛔ **Phase 4–6 (execution) — out of scope by principle, not "later."** *This* is where
+   the architecture would escalate beyond B2: the tool-less orchestrator model gives way to
+   **agentic tool_call** with tier-2 mutating tools, and the governance the report specifies
+   becomes load-bearing — **human approval gate + AI Gateway (LiteLLM/Portkey) + ACS
+   fail-closed policy at the tool-execution checkpoint + full VAT**. **Decision: this harness
+   does not do execution.** Applying a fix (Phase 5) is a hard-to-undo, destructive change
+   that requires human evaluation and mutate permissions — exactly the point §1 says this
+   harness "stops precisely at," and exactly what §3.1's read-only-IAM outer guarantee and
+   §3.2's tool-less B2 invariant are built to make *impossible*. Adding mutation would dissolve
+   both, and would push a distributed self-hostable monitoring harness into a different product
+   class (grant mutate IAM + run a fail-closed policy engine + gateway). So Phase 5–6
+   (apply/verify destructive change) is a **permanent non-goal** for this harness, not a
+   deferred milestone. **Phase 4 non-destructive writes** (remediation *recommendation* text
+   is already emitted in triage; ticket creation / DefectDojo verdict write-back S3.4b §14.2)
+   are the one adjacent seam left open as a future **opt-in** — they cross the "first write
+   outside Discord/ledger" line but are not destructive infrastructure change. If execution is
+   ever wanted, it belongs in a **separate, governance-carrying harness**, introduced exactly
+   when mutation is on the table — not by loosening this one.
 
 ## 9. Relationship to the rest of the repo
 
@@ -429,12 +449,21 @@ the cross-harness session log; this checklist is the vulntriage-specific roadmap
   core with the monitors — logic is copied, not imported.
 - **Same security ethos, adapted:** the monitors keep untrusted *feed* text away from
   tools; this harness keeps untrusted *scan/intel* output away from tools **and** the
-  cloud away from writes (read-only IAM). B2 is preserved for v1; the agentic
-  escalation is the documented Phase 4–6 step.
+  cloud away from writes (read-only IAM). B2 is preserved — permanently, not just for v1:
+  destructive execution (Phase 5–6) is a non-goal here (§8.4), so no mutating tool is ever
+  introduced. Like the monitors, this harness observes and reports; it does not act on the account.
 - **Idempotent ledger, no secrets, attribution/ToS in code** — unchanged.
 
 ## 10. Open decisions
 
+- ~~**Execution phases (Phase 4–6).**~~ **Resolved: out of scope by principle (§8.4).**
+  Applying/verifying a fix is a hard-to-undo destructive change requiring human evaluation
+  and mutate permissions — it would dissolve the read-only-IAM outer guarantee (§3.1) and the
+  tool-less B2 invariant (§3.2), and push a distributed self-hostable monitoring harness into a
+  different product class. **Phase 5–6 are a permanent non-goal** for this harness; if ever
+  wanted, execution belongs in a separate, governance-carrying harness. **Phase 4
+  non-destructive writes** (recommendation text — already emitted; ticket creation / DefectDojo
+  verdict write-back S3.4b, §14.2) remain the one adjacent seam open as a future opt-in.
 - **Name.** `aisec-vulntriage` is provisional. The `aisec-` prefix here means "an AI
   agent doing security work," vs the monitors' "monitoring AI-security topics" — same
   prefix, different sense. Confirm keep vs rename (e.g. `aisec-cloud-triage`).
@@ -464,8 +493,10 @@ where AI agents / HaaS can substitute; (2) the vulnerability/patch-management ag
 workflow PoC (Phase 0–7, HITL gates, VAT); (3) the AWS-origin, OSS-cored, OpenClaw
 orchestration design (Cartography / Prowler / Trivy / DefectDojo / Sigstore; AI
 Gateway; ACS / ASSERT / AGT governance). This harness is the v1 slice of that report:
-read-only, B2-preserving, walking-skeleton scope, with the report's agentic/governance
-machinery placed on the roadmap for the execution phases.
+read-only, B2-preserving, walking-skeleton scope. The report's agentic/governance machinery
+(AI Gateway, ACS/ASSERT/AGT, HITL execution gates) belongs to the execution phases (Phase 4–6),
+which this harness treats as a **non-goal** (§8.4): if execution is ever built, it is a separate,
+governance-carrying harness — this one stays read-only and observe-and-report.
 
 ## 12. Stage 2 design annex — graph context (Cartography + Neo4j)
 
