@@ -560,6 +560,13 @@ reflects current topology; a stale graph only yields stale *facts*, never a wron
 > edge presence, add the flag to your **recurring** sync: a plain re-sync without it removes
 > the edges and the harness silently reverts to the proxy (graceful, never wrong).
 >
+> **To make this the default, use [`ops/sync-cartography.sh`](../../ops/sync-cartography.sh) as your
+> recurring sync instead of a bare `cartography`.** It bakes in `--permission-relationships-file`
+> (locating the shipped mapping automatically), runs against AWS through the read-only profile, and
+> verifies the typed edges are present afterward — so "recurring sync" and "reachability stays lit"
+> become the same thing. `ops/sync-cartography.sh` (no arg) reports readiness and current edge counts
+> without changing anything.
+>
 > Two further over-privilege signals from these edges are **opt-in and off by default**, because a
 > blanket version over-fires (on our reference account, treating any `GET_SECRET` reach as
 > over-privilege flagged 33% of principals — all legitimate single-secret service roles). Enable them

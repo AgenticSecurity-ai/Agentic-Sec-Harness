@@ -15,6 +15,7 @@ takes `--apply` to mutate.
 |---|---|
 | [`bootstrap.sh`](bootstrap.sh) | Rebuild a wiped OpenClaw host runtime. `check` reports the status of every component (uv, OpenClaw, provider/Discord, Prowler venv, agents+`minimal` profile, `operator.admin`, `.env`, state, cron); `--apply` auto-fixes the deterministic pieces and restores `.env`/ledgers/evidence from the latest backup. Secret-bearing steps (Bedrock creds, Discord token, the `operator.admin` gateway-stop edit) are printed, never automated. |
 | [`ensure-neo4j.sh`](ensure-neo4j.sh) | Make the Stage 2 graph's Neo4j container durable: named volume, `--restart unless-stopped`, `127.0.0.1`-only ports. `--apply` migrates the old anonymous volume and verifies the node count is preserved. |
+| [`sync-cartography.sh`](sync-cartography.sh) | Run the Stage 2 Cartography sync **with `--permission-relationships-file` baked in**, so the typed reachability edges (`CAN_PASS_ROLE`/`GET_SECRET`/…) that back the harness's deeper over-privilege signals survive every recurring sync (a plain `cartography` re-sync silently strips them). `check` reports sync-container durability + current edge counts; `--apply` makes the container durable and runs the sync. Read-only against AWS, secret-free. Use **this** as your recurring sync, not a bare `cartography`. |
 | [`backup-state.sh`](backup-state.sh) | Copy the irreplaceable git-ignored state — `evidence.log` (hash-chained audit trail), the 3 `seen.json` ledgers, and the non-secret `.env`s — to a timestamped, rotated dir under `/mnt/c` (survives a WSL reset), with a sha256 manifest. Run from cron for continuous protection. |
 
 ## Typical use
@@ -24,6 +25,7 @@ takes `--apply` to mutate.
 ops/bootstrap.sh                 # see what's missing
 ops/bootstrap.sh --apply         # rebuild the deterministic parts; follow the printed manual steps
 ops/ensure-neo4j.sh --apply      # (Stage 2 only) stand up a durable Neo4j, then re-sync Cartography
+ops/sync-cartography.sh --apply  # (Stage 2 only) re-sync the graph WITH reachability edges (make this your recurring sync)
 
 # Routine protection (ideally from cron):
 ops/backup-state.sh              # snapshot ledgers + evidence + .env to /mnt/c
@@ -37,3 +39,5 @@ ops/backup-state.sh              # snapshot ledgers + evidence + .env to /mnt/c
 - `VULNTRIAGE_NEO4J_PASSWORD` — Neo4j secret (else recovered from the running container).
 - `NEO4J_CONTAINER`, `NEO4J_IMAGE`, `NEO4J_DATA_VOLUME`, `NEO4J_NETWORK`, `NEO4J_HTTP_PORT`,
   `NEO4J_BOLT_PORT`, `NEO4J_HEAP` — ensure-neo4j overrides.
+- `CARTO_CONTAINER`, `CARTO_IMAGE`, `NEO4J_BOLT_URI`, `NEO4J_HTTP`, `NEO4J_DB`, `CARTO_MODULES`
+  (default `aws`), `VULNTRIAGE_AWS_PROFILE` (default `vulntriage-readonly`), `AWS_DIR` — sync-cartography overrides.
