@@ -157,22 +157,75 @@ def finding_epss(item):
     return max(scores) if scores else 0.0
 
 
-def graph_over_privileged(item):
+def _breadth_over_priv_threshold(triage_cfg):
+    """The [triage].blast_breadth_over_priv threshold as a positive int, or 0 (disabled)
+    when unset / non-positive / not a plain integer. A bool or a string is a config TYPE
+    error and we fail SAFE (disabled) rather than coerce it into an accidental threshold:
+    int(True) == 1 would flag every principal with a single reachability edge, and
+    int("1") would silently accept a string (DESIGN §12.12.1). Malformed values are
+    warned about once per run by warn_bad_triage_knobs()."""
+    v = (triage_cfg or {}).get("blast_breadth_over_priv", 0)
+    return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else 0
+
+
+def _secret_read_over_priv(triage_cfg):
+    """Whether the GET_SECRET reachability over-privilege signal is enabled. Requires a
+    real TOML boolean `true`; a truthy string like "false" (a common config typo) must
+    NOT silently enable this deliberately-noisy signal (DESIGN §12.12.1), so we accept
+    only bool True — anything else fails safe (disabled)."""
+    return (triage_cfg or {}).get("secret_read_over_priv") is True
+
+
+def warn_bad_triage_knobs(triage_cfg):
+    """Emit a one-time warning when an S2.7 reachability knob is set to a wrong-typed
+    value (which is then ignored / disabled — see the two helpers above). Called once in
+    main() so the per-finding over-privilege check stays quiet."""
+    cfg = triage_cfg or {}
+    b = cfg.get("blast_breadth_over_priv", 0)
+    if not (isinstance(b, int) and not isinstance(b, bool)):
+        progress(f"[warn] [triage].blast_breadth_over_priv must be an integer; got "
+                 f"{b!r} — ignoring it (breadth over-privilege disabled).")
+    s = cfg.get("secret_read_over_priv", False)
+    if not isinstance(s, bool):
+        progress(f"[warn] [triage].secret_read_over_priv must be true or false; got "
+                 f"{s!r} — ignoring it (secret-read over-privilege disabled).")
+
+
+def graph_over_privileged(item, triage_cfg=None):
     """Graph-derived over-privilege for the finding's IAM principal (collector fact),
     or None when the graph has no blast-radius opinion (the resource is not a joined IAM
-    principal, or [graph] is off / unavailable). Two collector signals, either sufficient:
+    principal, or [graph] is off / unavailable). Collector signals, any one sufficient:
     (1) the wildcard proxy — a `*` or `service:*` Allow statement (the honest v1 signal,
-    always available); and (2) TRUE reachability — when the deployer enabled the opt-in
+    always available); (2) TRUE reachability — when the deployer enabled the opt-in
     permission_relationships mapping, an `iam:PassRole` reachability edge is a
-    privilege-escalation path even with NO wildcard statement (DESIGN §12.12). Reachability
-    only strengthens the signal; its absence degrades to the proxy alone."""
+    privilege-escalation path even with NO wildcard statement (DESIGN §12.12); and, both
+    OFF by default and gated on [triage] config (DESIGN §12.12 / S2.7), the two noisier
+    reachability knobs: (3) breadth — reaching >= `blast_breadth_over_priv` distinct
+    resources; (4) secret-read — a `GET_SECRET` reachability edge. Reachability only
+    strengthens the signal; its absence degrades to the proxy alone. Knobs (3)/(4) are
+    tuned per-account by the deployer after measuring their own graph, so the distribution
+    ships them disabled (triage_cfg absent / keys unset ⇒ byte-identical to pre-S2.7)."""
     br = (item.get("graph") or {}).get("blast_radius")
     if not br:
         return None
     if br.get("admin_like") or (br.get("wildcard_service_stmts") or 0) > 0:
         return True
     reach = br.get("reachable")
-    return bool(reach and reach.get("can_pass_role"))
+    if not reach:
+        return False
+    if reach.get("can_pass_role"):
+        return True
+    # S2.7 opt-in breadth / secret-read signals — config-gated, default off, and STRICT
+    # about config types (see the two helpers) so a wrong-typed knob fails safe rather
+    # than silently enabling a noisy signal. The crisp can_pass_role path above stays
+    # always-on; these only ever ADD firings when a deployer explicitly enables them, so
+    # an absent/empty triage_cfg is a no-op.
+    breadth = _breadth_over_priv_threshold(triage_cfg)
+    if breadth and (reach.get("total") or 0) >= breadth:
+        return True
+    if _secret_read_over_priv(triage_cfg) and reach.get("can_read_secret"):
+        return True
+    return False
 
 
 def floor_priority(priority, item, triage_cfg):
@@ -209,12 +262,12 @@ def floor_priority(priority, item, triage_cfg):
     # collect.py's graph_facts() now WALKS the EC2→instance-profile→role bridge (DESIGN
     # §12.11) so the instance inherits its role's blast radius — exposure and over-privilege
     # meet on one finding rather than being computed on separate nodes.
-    if exposed and graph_over_privileged(item) and (kev or epss_high):
+    if exposed and graph_over_privileged(item, triage_cfg) and (kev or epss_high):
         raise_to("Critical")
     return _LABEL[rank]
 
 
-def build_prompt(items, language):
+def build_prompt(items, language, triage_cfg=None):
     """Prompt for the tool-less triage LLM. Untrusted finding fields are fenced as
     DATA; the deterministic KEV/EPSS/exposure signals are provided so the LLM's
     reasoning is grounded, but the orchestrator — not the LLM — is authoritative for
@@ -234,7 +287,7 @@ def build_prompt(items, language):
         "max_epss": round(finding_epss(it), 5),
         # Graph-derived over-privilege (collector fact, null when the graph has no
         # opinion) — grounds the excess_privilege judgment below (DESIGN §12.1).
-        "over_privileged": graph_over_privileged(it),
+        "over_privileged": graph_over_privileged(it, triage_cfg),
     } for it in items]
     return f"""You are a security triage step in an automated pipeline. You have NO tools.
 Do not attempt to scan, fetch, post, or run anything — only return text.
@@ -316,7 +369,7 @@ def clip(text, limit=RATIONALE_MAX_CHARS):
     return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
 
 
-def build_rationale(item, verdict, priority):
+def build_rationale(item, verdict, priority, triage_cfg=None):
     """Compose the DESIGN §5 rationale object: deterministic collector facts
     (kev_listed / epss / internet_exposed) MERGED with the LLM's judgments
     (excess_privilege / asset_criticality / summary). The deterministic facts are
@@ -329,7 +382,7 @@ def build_rationale(item, verdict, priority):
     # opt-in reachability edges (§12.12) the graph is incomplete (§12.9), so the LLM may still
     # see over-privilege the graph misses. The blast_radius (incl. any `reachable` block) is
     # recorded verbatim in the signed evidence via rationale["graph"]["blast_radius"] below.
-    excess = bool(verdict.get("excess_privilege", False)) or bool(graph_over_privileged(item))
+    excess = bool(verdict.get("excess_privilege", False)) or bool(graph_over_privileged(item, triage_cfg))
     rationale = {
         "kev_listed": finding_kev(item),
         "epss": round(finding_epss(item), 5),
@@ -515,6 +568,7 @@ def main():
     channel_id = (os.environ.get("VULNTRIAGE_CHANNEL_ID") or "").strip()
     language = cfg.get("output", {}).get("language", "ja")
     triage_cfg = cfg.get("triage", {})
+    warn_bad_triage_knobs(triage_cfg)
     if not channel_id:
         sys.exit("[error] no Discord channel configured — set VULNTRIAGE_CHANNEL_ID "
                  "in .env (copy .env.example) or export it in the environment.")
@@ -544,7 +598,7 @@ def main():
         progress(f"[..] chunk {n}/{len(chunks)}: triaging {len(chunk)} finding(s)…")
         chunk_ids = {it["id"] for it in chunk}
         try:
-            result = call_agent(build_prompt(chunk, language), f"{_SESSION_BASE}-c{n}")
+            result = call_agent(build_prompt(chunk, language, triage_cfg), f"{_SESSION_BASE}-c{n}")
         except AgentError as exc:
             deferred += len(chunk)  # left unmarked -> retried next run
             progress(f"[warn] chunk {n}/{len(chunks)} failed; leaving {len(chunk)} "
@@ -576,7 +630,7 @@ def main():
         if priority not in _RANK:
             priority = "Medium"  # coerce an out-of-enum label to a safe default
         priority = floor_priority(priority, item, triage_cfg)
-        rationale = build_rationale(item, v, priority)
+        rationale = build_rationale(item, v, priority, triage_cfg)
 
         # Append the signed, hash-chained evidence record: inputs BY DIGEST → priority
         # → rationale (DESIGN §3.5). Never store the raw untrusted finding text here.

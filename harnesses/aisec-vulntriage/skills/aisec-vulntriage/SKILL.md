@@ -161,7 +161,10 @@ guarantees.
   `permission_relationships` edges, `blast_radius` deepens from that wildcard *proxy* into
   true reachability — a principal that can `iam:PassRole` is flagged over-privileged even
   with no wildcard statement (self-activates on edge presence; degrades to the proxy without
-  them). See `DESIGN.md` §12.12.
+  them). See `DESIGN.md` §12.12. Two further reachability signals — reaching ≥ N distinct
+  resources (`blast_breadth_over_priv`) and holding a `GET_SECRET` edge (`secret_read_over_priv`)
+  — are **opt-in `[triage]` config, off by default** because a blanket version over-fires (§12.12.1);
+  the always-on `iam:PassRole` signal is unaffected by them.
 - **Graceful degrade — same contract as a down intel feed.** If `[graph].enabled` is off,
   `VULNTRIAGE_NEO4J_PASSWORD` is unset, Neo4j is unreachable, or a finding doesn't join a
   node, that finding falls back to the keyword exposure flag and simply gains no graph

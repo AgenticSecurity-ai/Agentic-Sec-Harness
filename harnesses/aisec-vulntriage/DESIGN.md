@@ -361,6 +361,12 @@ the cross-harness session log; this checklist is the vulntriage-specific roadmap
      `graph_over_privileged` now also fires on an `iam:PassRole` escalation path with no
      wildcard statement. Self-activating on edge presence (no new config), degrades to the
      proxy when absent. Offline 19/19 + live 2-leg on the real graph. Detailed in **§12.12**.
+   - ✅ **S2.7 Breadth / secret-read over-privilege knobs** — opt-in, default-off `[triage]`
+     config (`blast_breadth_over_priv` / `secret_read_over_priv`) promoting the `reachable`
+     breadth and `GET_SECRET` signals to over-privilege inputs; measured to over-fire if blanket
+     (secret-read hits 33% of unflagged principals on the real account), so shipped off and
+     deployer-tuned (strict fail-safe config typing; `graph-check` reports would-fire counts).
+     Offline 35/35 + live 2-leg. Detailed in **§12.12.1**.
 3. ✅ **+ More collectors & audit-grade evidence** — three independent tracks, all shipped:
    **Trivy** (image/package CVEs), **DefectDojo** (system of record), and **off-host signing**
    (KMS-delegated; Sigstore keyless + Rekor deferred to S3.5b) to move evidence signing off the host — the
@@ -884,10 +890,10 @@ proxy stands exactly as before. There is deliberately **no** `[graph]` flag for 
 it lights up when the data supports it and degrades silently when it doesn't. (Consequence: an operator
 who wants reachability must add the mapping flag to their **recurring** Cartography sync; a plain re-sync
 removes the edges and the harness reverts to the proxy — graceful, never wrong.) `can_read_secret` and the
-`total`/`by_rel` breadth are recorded in the signed evidence and shown to the LLM, but do **not** by
-themselves raise the floor — only the crisp `can_pass_role` escalation path does. A breadth threshold
-(flag over-privilege at N reachable resources) is a future tuning knob, intentionally not taken here to
-keep the floor conservative.
+`total`/`by_rel` breadth are recorded in the signed evidence and shown to the LLM, but did **not** by
+themselves raise the floor at S2.6 — only the crisp `can_pass_role` escalation path did. The breadth
+threshold and secret-read signals were the "future tuning knob" flagged here; **S2.7 (§12.12.1) adds them
+as opt-in, default-off `[triage]` config**, after measuring that a blanket version over-fires.
 
 **Why `can_pass_role` and not "any reachability" (measured, non-noisy).** Of 71 role/user principals in
 the account, folding `can_pass_role` into over-privilege newly flags **exactly 2** — the
@@ -909,6 +915,72 @@ via the harness's own `graph_facts()` HTTP Cypher over the real graph after an o
 `graph_over_privileged=True` **purely via reachability** (the wildcard proxy missed it), `full_access`
 still fires via the proxy (regression), and the read-only role carries no `reachable` block and is **not**
 over-flagged. The live ledger/evidence were untouched (read-only queries only).
+
+### 12.12.1 S2.7 — breadth / secret-read as opt-in over-privilege signals (2026-07-14)
+
+§12.12 deliberately fired the floor on `can_pass_role` alone and left the `reachable` breadth
+(`total`/`by_rel`) and `can_read_secret` as evidence-only, calling a breadth threshold a "future tuning
+knob." S2.7 takes that knob — but as **config-gated, default-off** signals, because measurement shows a
+blanket version over-fires.
+
+**Two new `[triage]` knobs (both ship OFF):**
+- `blast_breadth_over_priv = N` (int, `0`/unset = disabled): a principal reaching **≥ N** distinct
+  resources (`blast_radius.reachable.total`) is over-privileged.
+- `secret_read_over_priv = false` (bool): a `GET_SECRET` reachability edge (`reachable.can_read_secret`)
+  makes a principal over-privileged.
+
+`graph_over_privileged(item, triage_cfg)` gains these two checks **after** the always-on wildcard proxy
+and `can_pass_role` (which are unaffected). All three consumers — the LLM `over_privileged` hint
+(`build_prompt`), the `excess_privilege` evidence field (`build_rationale`), and the toxic-combination
+floor (`floor_priority`) — thread the same `triage_cfg` so they share one over-privilege definition.
+
+**Strict, fail-safe config typing.** Both knobs are parsed strictly rather than coerced, because these are
+*safety* controls whose worst failure is a silent enable. `blast_breadth_over_priv` accepts only a plain
+positive `int` (`_breadth_over_priv_threshold`) — a bool or string is a config type error and disables the
+knob, because `int(True)==1` would otherwise flag every reachable principal and `int("1")` would silently
+accept a string. `secret_read_over_priv` requires a real boolean `true` (`_secret_read_over_priv`) — a
+truthy string like `"false"` (a common TOML typo) must not enable this noisy signal. A wrong-typed value is
+warned about once per run (`warn_bad_triage_knobs`, called in `main()`) and then treated as disabled — fail
+safe, never a silent over-flag. The `graph-check` diagnostic reports, alongside the always-on counts, how
+many principals the breadth (at the configured threshold) and secret-read signals *would* flag, plus the
+max reach, so an operator can size the threshold before enabling.
+
+**Why config-gated, not edge-presence-gated like §12.12.** `can_pass_role` is a crisp, account-independent
+escalation primitive, so it lit up on edge presence alone. Breadth and secret-read are **deployment-relative
+judgments** — "how many resources is too many" and "is reading a secret abnormal" depend on the account —
+so the right shape is a knob the deployer tunes after measuring their own graph, shipped off so the
+distribution is byte-identical to pre-S2.7 (`triage_cfg` absent / keys unset ⇒ no new firings).
+
+**Measured firing distribution (real account 278059980943, 71 role/user principals, the S2.6 population).**
+Wildcard proxy flags 15; `can_pass_role` adds 2 (the `BedrockAPIKey` users); 17 flagged, 54 unflagged.
+- **breadth: 0 new at any N.** The *max* `reachable.total` among the 54 unflagged principals is **1**.
+  The genuinely broad principals are already caught — `full_access` (total 85) by the wildcard proxy, the
+  `BedrockAPIKey` users (total 38–39) by `can_pass_role`. So on this account breadth adds nothing beyond
+  the always-on signals; it is a knob for accounts with broad **non-wildcard** roles, which this one lacks.
+- **secret-read: 18 of 54 (33%) new firings** — every `AmazonBedrockAgentCoreSDKRuntime-*` service role,
+  each reading exactly **one** secret. This is textbook over-fire: legitimate service roles that read a
+  single secret would all be relabelled over-privileged. This measurement is *why* `secret_read_over_priv`
+  ships off with a "tune, don't guess" warning in `config.toml`, rather than being always-on like
+  `can_pass_role`.
+
+**Verification.** Offline synthetic-graph gate — **35 checks, all pass**: regression (wildcard/`can_pass_role`
+fire regardless of cfg; `reachable`-only with knobs off ⇒ byte-identical `False`; no-graph ⇒ `None`);
+breadth boundary (`total=50` fires at N≤50, not at N=51; N=0/negative disabled); **strict typing**
+(`"50"`/`True`/`"abc"`/`None` all fail safe to disabled — the string and bool cases are the ones the old
+`int()` coercion would have wrongly accepted; `secret_read_over_priv="false"`/`"true"`/`1` all disabled,
+only bool `True` enables; `warn_bad_triage_knobs` never raises); secret-read (fires only with the flag on
+and a real `GET_SECRET`); `can_pass_role` precedence;
+`floor_priority` integration (exposed ∧ KEV ∧ breadth/secret-over-priv ⇒ **Critical**; the same finding
+with the knob off floors only to **High**; not-exposed ⇒ no Critical); `build_rationale.excess_privilege`
+tracks the knob. **Live 2-leg confirmation (2026-07-14, real account 278059980943), through the harness's
+own `graph_facts()` HTTP Cypher over the real graph (read-only, ledger/evidence untouched):** *leg 1* — an
+`AgentCoreSDKRuntime` role with **no** wildcard, **no** pass-role, only a real `GET_SECRET` edge
+(`reachable.total=1`, `can_read_secret=True`) resolves `graph_over_privileged=True` when `secret_read_over_priv`
+(or `blast_breadth_over_priv=1`) is set — the new signals materialize on real edges; *leg 2* — with the
+knobs off (distribution default) the same role is `False` (byte-identical to pre-S2.7, the 33%-over-fire
+suppressed), while the wildcard `AdministratorAccess` role (proxy) and the `BedrockAPIKey` user
+(`can_pass_role`) still fire, and `aisec-vulntriage-readonly` carries no `reachable` block and is not
+over-flagged.
 
 ## 13. Stage 3 design annex — Trivy collector (image/package CVEs)
 

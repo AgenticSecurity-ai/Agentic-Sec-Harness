@@ -66,6 +66,20 @@ kev_forces_at_least = "High"   # any KEV-listed CVE floors priority to at least 
 epss_high_threshold = 0.5      # EPSS >= this floors priority to at least High
 exposure_forces_at_least = "High"  # internet-exposed finding floors to at least this
 
+# Stage 2 reachability over-privilege knobs (DESIGN §12.12 / S2.7). BOTH default OFF so
+# the distribution behaves exactly as before; they only ever ADD over-privilege firings.
+# They require the opt-in Cartography permission_relationships sync (see README appendix)
+# — with no reachability edges they are inert. A deployer turns them on AFTER measuring
+# the firing distribution on their own account (service roles legitimately reach many
+# resources / read secrets, so a blanket threshold over-fires — tune it, don't guess).
+# blast_breadth_over_priv: flag a principal as over-privileged when it can reach at least
+#   this many distinct resources (blast_radius.reachable.total). 0 / unset = disabled.
+blast_breadth_over_priv = 0
+# secret_read_over_priv: treat GET_SECRET reachability (reachable.can_read_secret) as
+#   over-privilege. Noisier than iam:PassRole (service roles routinely read secrets), so
+#   default false. The always-on can_pass_role signal is unaffected by both knobs.
+secret_read_over_priv = false
+
 [output]
 # Language for the generated triage rationale posted to Discord ("ja", "en", ...).
 language = "ja"

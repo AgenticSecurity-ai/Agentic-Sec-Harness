@@ -559,6 +559,20 @@ reflects current topology; a stale graph only yields stale *facts*, never a wron
 > and **no harness config** — it self-activates when the edges are present. Because it keys on
 > edge presence, add the flag to your **recurring** sync: a plain re-sync without it removes
 > the edges and the harness silently reverts to the proxy (graceful, never wrong).
+>
+> Two further over-privilege signals from these edges are **opt-in and off by default**, because a
+> blanket version over-fires (on our reference account, treating any `GET_SECRET` reach as
+> over-privilege flagged 33% of principals — all legitimate single-secret service roles). Enable them
+> in `config.toml` `[triage]` **only after measuring your own graph** (`graph-check` shows each
+> principal's `reachable.total` and capabilities):
+>
+> ```toml
+> [triage]
+> blast_breadth_over_priv = 0      # >0: flag a principal reaching >= N distinct resources
+> secret_read_over_priv = false    # true: flag a GET_SECRET reachability edge as over-privilege
+> ```
+>
+> The always-on `iam:PassRole` signal above is unaffected by these knobs.
 
 ### 4. Turn the graph on
 
