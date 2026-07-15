@@ -77,6 +77,48 @@ human.
 - **You** — the setup, the read-only IAM role, and final responsibility for acting on
   a finding.
 
+**The pipeline at a glance** — the phases below map to the source report's
+vulnerability-management lifecycle; this harness runs **Phase 1–3 + 7** and stops
+before execution. Letters are the steps detailed in the table that follows; the
+order is the real runtime order (scan → dedup → enrich → triage → report).
+
+```
+  v1 = Phase 1–3 + 7, read-only.  ★ = AI step.  ○ = opt-in add-on (default off).
+
+  You  │ A. Choose scan scope + provision a read-only IAM role   (setup / boundary)
+       │
+  ── Phase 1 · COLLECT ──────────────────────────────────────────────────────
+  Tool │ B. Collect findings → normalise to one common schema:
+       │      • Prowler     — AWS cloud posture (read-only)       default
+       │      • Trivy       — container image / package CVEs      ○ opt-in
+       │      • DefectDojo  — import from your system of record   ○ opt-in
+  Tool │ D. Drop findings already handled (dedup ledger)
+  ── Phase 2 · ENRICH ───────────────────────────────────────────────────────
+  Tool │ C. Look up each CVE vs public intel (KEV / EPSS / NVD)
+  Tool │    ○ Graph context — query a Cartography-populated Neo4j (HTTP Cypher)
+       │        → exposure path + blast-radius / reachability     ○ opt-in
+  ── Phase 3 · TRIAGE ───────────────────────────────────────────────────────
+  AI ★ │ E. Assign a priority to each finding
+  AI ★ │ F. Judge excess-privilege / asset-criticality + write the "why"
+       │        (graph exposure + reachability sharpen this when on)
+  Tool │ G. FLOOR the priority with KEV / EPSS / exposure facts  (AI can't lower)
+  ── Phase 4–6 · EXECUTE ────────────────────────────────────────────────────
+   ⛔    decide → apply fix → verify          OUT OF SCOPE by principle (§8.4)
+  ── Phase 7 · REPORT + EVIDENCE ────────────────────────────────────────────
+  Tool │ H. Sign each verdict into the append-only evidence log:
+       │      none (default) / HMAC / local ECDSA / ○ AWS KMS off-host
+  Tool │ I. Post the digest to Discord   (from trusted metadata, never LLM text)
+  Tool │ J. Confirm the post + retry next run  (idempotent — no silent loss)
+
+  Cartography + Neo4j are operator-run out-of-band; the harness only *queries* a
+  populated Neo4j, read-only. Off-host KMS delegates the signature to AWS KMS so it
+  can't be forged from the host. Every ○ item ships off by default — the live default
+  path is Prowler → intel → AI triage → Discord → chain-only evidence.
+  B2 boundary: only the ★ steps (E, F) are AI — a prompt injection in scanned content
+  can at worst distort an E/F summary; it can never collect, post, sign, lower a
+  floor, or execute.
+```
+
 **"Human check?"** is flagged **Yes** when a failure is hard to undo (an
 already-public post) OR output quality varies (triage / summary errors).
 
