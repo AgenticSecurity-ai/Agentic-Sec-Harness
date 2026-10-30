@@ -24,6 +24,7 @@ import time
 import random
 import argparse
 import tomllib
+import http.client
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -88,8 +89,8 @@ def base_id(raw_id):
     return tail
 
 
-def parse_entries(xml_text):
-    root = ET.fromstring(xml_text)
+def parse_entries(xml_data):
+    root = ET.fromstring(xml_data)
     out = []
     for e in root.findall(f"{ATOM}entry"):
         raw_id = (e.findtext(f"{ATOM}id") or "").strip()
@@ -161,7 +162,7 @@ def query_arxiv(query, max_results):
     for attempt in range(MAX_RETRIES + 1):
         try:
             with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as r:
-                return r.read().decode("utf-8")
+                return r.read()  # bytes: the XML parser reports bad UTF-8 as ParseError
         except urllib.error.HTTPError as e:
             # HTTPError subclasses URLError, so catch it first. Retry only transient
             # statuses (rate-limit / server errors); 4xx like 400 are query bugs -> raise.
@@ -204,16 +205,26 @@ def cmd_fetch(cfg, seen_path):
             time.sleep(RATE_LIMIT_SECONDS)  # arXiv ToU: 1 request / 3 sec
         _log(f"[fetch] query {i + 1}/{n}: requesting newest {max_results} ...")
         try:
-            xml_text = query_arxiv(q, max_results)
-        except Exception as exc:  # network/parse resilience: report, keep going
+            xml_data = query_arxiv(q, max_results)
+        # Network only: a dropped connection or truncated body is raised as-is, not
+        # as URLError. Anything else is a bug and must stay loud.
+        except (OSError, http.client.HTTPException) as exc:
             failures += 1
-            print(f"[warn] query {i + 1}/{n} failed after retries: {exc}", file=sys.stderr)
+            print(f"[warn] query {i + 1}/{n} failed: {exc}", file=sys.stderr)
             continue
-        got = parse_entries(xml_text)
+        try:
+            got = parse_entries(xml_data)
+        except ET.ParseError as exc:  # one malformed response must not sink the others
+            failures += 1
+            print(f"[warn] query {i + 1}/{n} unparseable: {exc}", file=sys.stderr)
+            continue
         for item in got:
             merged[item["id"]] = item  # dedupe across queries
         _log(f"[fetch] query {i + 1}/{n}: {len(got)} returned "
              f"| {len(merged)} unique so far")
+
+    if n and failures == n:  # total outage must not look like "no new papers"
+        raise RuntimeError(f"all {n} queries failed")
 
     fresh = []
     for item in merged.values():

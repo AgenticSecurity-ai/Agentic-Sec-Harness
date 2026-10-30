@@ -58,7 +58,7 @@ errors).
 | Step (what a human would do) | Who | Human check? | Why |
 |---|:--:|:--:|---|
 | **A.** Decide what to watch (`arxiv.queries`) | You | — | Your call; the monitoring strategy is not automated. |
-| **B.** Fetch new papers from arXiv | Tool | No | Deterministic; a failed fetch self-recovers next run — nothing is lost. |
+| **B.** Fetch new papers from arXiv | Tool | No | Deterministic; a failed fetch retries next run. Papers still inside `lookback_days` and `max_results` are recovered; a longer outage can miss some. |
 | **C.** Track what's already been seen | Tool | No | Deterministic & idempotent — marked seen only after a post succeeds. |
 | **D.** Judge relevance (drop the false matches) | AI | **Yes** | The core triage; quality varies and mis-judgements happen. |
 | **E.** Classify (Security for AI / AI for Security / Other) | AI | Yes (light) | Can vary, but the impact is limited to a single label. |
