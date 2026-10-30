@@ -277,15 +277,23 @@ def cmd_fetch(cfg, seen_path):
         _log(f"[fetch] feed {i + 1}/{n}: requesting {feed} ...")
         try:
             xml_text = fetch_feed(feed)
-        except Exception as exc:  # network/parse resilience: report, keep going
+        except Exception as exc:  # network resilience: report, keep going
             failures += 1
             print(f"[warn] feed {i + 1}/{n} failed after retries: {exc}", file=sys.stderr)
             continue
-        got = parse_items(xml_text)
+        try:
+            got = parse_items(xml_text)
+        except ET.ParseError as exc:  # one malformed feed must not sink the others
+            failures += 1
+            print(f"[warn] feed {i + 1}/{n} unparseable: {exc}", file=sys.stderr)
+            continue
         for item in got:
             merged.setdefault(item["id"], item)  # first feed wins on dup id
         _log(f"[fetch] feed {i + 1}/{n}: {len(got)} item(s) "
              f"| {len(merged)} unique so far")
+
+    if n and failures == n:  # total outage must not look like "no new articles"
+        raise RuntimeError(f"all {n} feeds failed")
 
     fresh = []
     for item in merged.values():
